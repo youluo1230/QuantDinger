@@ -52,6 +52,7 @@ celery_app.conf.update(
         "app.tasks.indicator_translation",
         "app.tasks.maintenance",
         "app.tasks.fundamental_sync",
+        "app.tasks.tradingview",
     ),
     task_routes={
         "quantdinger.tasks.fast_analysis": {"queue": "ai"},
@@ -64,6 +65,10 @@ celery_app.conf.update(
         "quantdinger.tasks.fundamental_sync_tick": {"queue": "maintenance"},
         "quantdinger.tasks.worker_heartbeat": {"queue": "maintenance"},
         "quantdinger.tasks.cleanup_runtime_metadata": {"queue": "maintenance"},
+        "quantdinger.tasks.tradingview_harvest": {"queue": "maintenance"},
+        "quantdinger.tasks.tradingview_assess": {"queue": "maintenance"},
+        "quantdinger.tasks.tradingview_convert": {"queue": "maintenance"},
+        "quantdinger.tasks.tradingview_verify": {"queue": "maintenance"},
     },
     beat_schedule={
         "fundamental-sync": {
@@ -93,6 +98,37 @@ celery_app.conf.update(
         "runtime-metadata-cleanup": {
             "task": "quantdinger.tasks.cleanup_runtime_metadata",
             "schedule": 86400.0,
+        },
+        # TradingView supply pipeline: harvest -> assess -> convert -> verify.
+        # Each task self-disables unless TRADINGVIEW_HARVEST_ENABLED is set, so
+        # the default deployment never reaches out to tradingview.com. The
+        # stages are not ordered against each other: every stage only picks up
+        # work left by an earlier run, so a stage that fires before its
+        # predecessor simply finds nothing and the corpus catches up on the
+        # next cycle.
+        "tradingview-harvest": {
+            "task": "quantdinger.tasks.tradingview_harvest",
+            "schedule": max(
+                3600, int(os.getenv("TRADINGVIEW_HARVEST_INTERVAL_SEC", "86400"))
+            ),
+        },
+        "tradingview-assess": {
+            "task": "quantdinger.tasks.tradingview_assess",
+            "schedule": max(
+                3600, int(os.getenv("TRADINGVIEW_ASSESS_INTERVAL_SEC", "86400"))
+            ),
+        },
+        "tradingview-convert": {
+            "task": "quantdinger.tasks.tradingview_convert",
+            "schedule": max(
+                3600, int(os.getenv("TRADINGVIEW_CONVERT_INTERVAL_SEC", "86400"))
+            ),
+        },
+        "tradingview-verify": {
+            "task": "quantdinger.tasks.tradingview_verify",
+            "schedule": max(
+                3600, int(os.getenv("TRADINGVIEW_VERIFY_INTERVAL_SEC", "86400"))
+            ),
         },
     },
 )

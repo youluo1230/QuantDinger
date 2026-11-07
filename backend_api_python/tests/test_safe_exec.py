@@ -448,3 +448,45 @@ def test_shared_watchdog_still_interrupts_non_main_thread_execution():
 
     assert not worker.is_alive()
     assert outcomes == ["TimeoutError"]
+
+
+# numpy imports ``numpy._core._methods`` lazily the first time a reduction such
+# as ``ndarray.mean()`` runs. Rejecting every underscore-prefixed attribute made
+# plain ndarray arithmetic unusable ("Import not allowed: dangerous pandas/numpy
+# submodule numpy._core._methods"), so the internal allow-list must cover it.
+_NDARRAY_REDUCTION = """
+import numpy as np
+values = df['close'].to_numpy()
+demeaned = values - values.mean()
+output = {'plots': [{'type': 'line', 'title': 'd', 'data': demeaned.tolist()}]}
+"""
+
+_NP_FROM_SERIES = """
+import numpy as np
+values = np.asarray(df['close'])
+output = {'plots': [{'type': 'line', 'title': 'v', 'data': (values - 1.0).tolist()}]}
+"""
+
+
+def test_ndarray_reduction_runs_inside_the_sandbox():
+    frame = pd.DataFrame({'close': [1.0, 2.0, 3.0, 4.0]})
+    response = safe_exec_indicator_isolated(_NDARRAY_REDUCTION, frame, {}, timeout=20)
+    assert response['success'] is True, response.get('error')
+    plot = response['result']['output']['plots'][0]
+    assert plot['data'] == [-1.5, -0.5, 0.5, 1.5]
+
+
+def test_np_asarray_arithmetic_runs_inside_the_sandbox():
+    frame = pd.DataFrame({'close': [1.0, 2.0, 3.0]})
+    response = safe_exec_indicator_isolated(_NP_FROM_SERIES, frame, {}, timeout=20)
+    assert response['success'] is True, response.get('error')
+
+
+def test_private_numpy_namespace_is_allowed_but_io_still_rejected():
+    from app.utils.safe_exec import _dangerous_pd_numpy_import
+
+    assert _dangerous_pd_numpy_import('numpy._core._methods') is None
+    assert _dangerous_pd_numpy_import('numpy._core') is None
+    # The documented IO escapes must keep failing.
+    assert _dangerous_pd_numpy_import('pandas.io') == 'pandas.io'
+    assert _dangerous_pd_numpy_import('numpy._np_utils') == 'numpy._np_utils'

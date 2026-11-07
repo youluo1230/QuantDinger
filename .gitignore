@@ -106,3 +106,13 @@ backend_api_python/data/memory/
 # Docker
 # ========================
 docker-compose.override.yml
+
+# ========================
+# Local artifacts (TradingView corpus, database dumps)
+# ========================
+# Harvested TradingView sources are a cache: publicly readable but not freely
+# redistributable, so they stay out of the repository. See
+# docs/trading/TRADINGVIEW_PIPELINE.md. Tests skip when the corpus is absent.
+tv_import/
+# Manual pg_dump snapshots taken before migrations.
+/qd_backup_*.dump

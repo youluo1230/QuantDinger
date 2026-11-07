@@ -56,6 +56,11 @@ gunicorn>=26.2.0
 flask-smorest>=0.47.0,<0.48
 marshmallow>=4.3.1,<5
 PyYAML>=6.0.3
+# Pine Script parsing for the TradingView strategy importer.
+# pynescript is LGPL-3.0-or-later while this repository is Apache-2.0, so it
+# stays optional at runtime: app/services/pine_transpiler degrades to a
+# conservative text scorer when the import fails.
+pynescript==0.3.0
 # Server-side PDF export for AI analysis reports
 # PDF parser security advisories through CVE-2026-119205; 6.21.4+
 pypdf>=6.21.4,<7

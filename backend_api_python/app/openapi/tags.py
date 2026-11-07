@@ -23,6 +23,7 @@ AI_CHAT = "AIChat"
 QUICK_TRADE = "QuickTrade"
 IBKR = "IBKR"
 ALPACA = "Alpaca"
+TRADINGVIEW = "TradingView"
 
 ALL_TAGS = [
     {"name": HEALTH, "description": "Liveness and API metadata (Public)"},
@@ -46,6 +47,7 @@ ALL_TAGS = [
     {"name": GLOBAL_MARKET, "description": "Global market overview (Public)"},
     {"name": AI_CHAT, "description": "Legacy AI chat compatibility (Internal)"},
     {"name": QUICK_TRADE, "description": "Manual quick trade (Internal)"},
+    {"name": TRADINGVIEW, "description": "TradingView strategy supply pipeline (Internal)"},
     {"name": IBKR, "description": "Interactive Brokers adapter (Internal)"},
     {"name": ALPACA, "description": "Alpaca adapter (Internal)"},
 ]

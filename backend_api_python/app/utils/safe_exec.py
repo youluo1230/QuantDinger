@@ -186,6 +186,16 @@ _DANGEROUS_PD_NUMPY_ATTRS: Set[str] = {
     'testing', 'tseries', 'api', 'conftest', 'lib',
 }
 
+# Underscore-prefixed namespaces that are implementation details rather than IO
+# escape hatches. numpy imports ``numpy._core._methods`` lazily the first time a
+# reduction such as ``ndarray.mean()`` runs, so rejecting every underscore-
+# prefixed attribute made ordinary ndarray arithmetic unusable: ``x - x.mean()``
+# raised "Import not allowed: dangerous pandas/numpy submodule
+# numpy._core._methods" even though user code never touched a private module.
+_SAFE_PD_NUMPY_INTERNAL: Set[str] = {
+    '_core', '_lib', '_libs', '_typing', '_config', '_utils', '_globals',
+}
+
 
 def _dangerous_pd_numpy_import(name: str) -> Optional[str]:
     """Return the blocked import path when a pandas/numpy submodule is unsafe."""
@@ -1053,14 +1063,22 @@ def _attribute_access_chain(node: Any) -> Tuple[Optional[str], list]:
 
 
 def _dangerous_pd_numpy_internal(root: Optional[str], attrs: list) -> Optional[str]:
-    """Detect pd.io / pd._libs / np.lib style internal access."""
+    """Detect pd.io / pd._libs / np.lib style internal access.
+
+    The check only inspects the first attribute below the package root, because
+    everything deeper is reached through an already-vetted namespace: once
+    ``numpy._core`` is allowed, ``numpy._core._methods`` follows it. Allowing a
+    documented internal namespace therefore does not widen the IO surface.
+    """
     if root not in _PANDAS_NUMPY_ROOTS or not attrs:
         return None
-    for idx, attr in enumerate(attrs):
-        if not isinstance(attr, str):
-            continue
-        if attr in _DANGEROUS_PD_NUMPY_ATTRS or attr.startswith('_'):
-            return f"{root}.{'.'.join(attrs[:idx + 1])}"
+    first = attrs[0]
+    if not isinstance(first, str):
+        return None
+    if first in _DANGEROUS_PD_NUMPY_ATTRS:
+        return f"{root}.{first}"
+    if first.startswith('_') and first not in _SAFE_PD_NUMPY_INTERNAL:
+        return f"{root}.{first}"
     return None
 
 
