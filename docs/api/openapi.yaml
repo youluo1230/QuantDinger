@@ -784,6 +784,8 @@ tags:
   description: Legacy AI chat compatibility (Internal)
 - name: QuickTrade
   description: Manual quick trade (Internal)
+- name: TradingView
+  description: TradingView strategy supply pipeline (Internal)
 - name: IBKR
   description: Interactive Brokers adapter (Internal)
 - name: Alpaca
@@ -9414,4 +9416,161 @@ paths:
       operationId: postApiQuickTradePositionProtection
       summary: Post Api Quick Trade Position Protection
       x-visibility: private
+  /api/tradingview/status:
+    get:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      summary: Aggregate pipeline counters for operators.
+      tags:
+      - TradingView
+      operationId: getApiTradingviewStatus
+      x-visibility: internal
+  /api/tradingview/scripts:
+    get:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      summary: Paginated staged candidate list, ordered by migratability score.
+      tags:
+      - TradingView
+      operationId: getApiTradingviewScripts
+      x-visibility: internal
+  /api/tradingview/scripts/{script_row_id}:
+    get:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      summary: One staged candidate including its cached Pine source.
+      tags:
+      - TradingView
+      operationId: getApiTradingviewScriptsScriptRowId
+      parameters:
+      - name: script_row_id
+        in: path
+        required: true
+        schema:
+          type: integer
+      x-visibility: internal
+    parameters:
+    - in: path
+      name: script_row_id
+      required: true
+      schema:
+        type: integer
+        minimum: 0
+  /api/tradingview/harvest:
+    post:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      summary: Run one discovery + source-fetch round synchronously.
+      description: 'Bounded by ``max_pages``/``max_sources`` so an interactive request
+        cannot
+
+        run for minutes; the scheduled Celery task has no such bound.'
+      tags:
+      - TradingView
+      operationId: postApiTradingviewHarvest
+      x-visibility: internal
+  /api/tradingview/assess:
+    post:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      summary: Score staged scripts that have no current assessment.
+      tags:
+      - TradingView
+      operationId: postApiTradingviewAssess
+      x-visibility: internal
+  /api/tradingview/convert:
+    post:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      summary: Transpile and compile-gate the best candidates into strategy sources.
+      tags:
+      - TradingView
+      operationId: postApiTradingviewConvert
+      x-visibility: internal
+  /api/tradingview/backtest:
+    post:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      summary: Backtest converted sources and optionally publish them to the market.
+      tags:
+      - TradingView
+      operationId: postApiTradingviewBacktest
+      x-visibility: internal
 openapi: 3.0.3
