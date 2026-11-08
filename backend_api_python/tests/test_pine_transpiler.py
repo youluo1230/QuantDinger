@@ -531,8 +531,149 @@ if ta.crossover(close, ta.sma(close, 9))
 
 
 def test_assess_migratability_is_importable_without_the_parser():
+    """The scorer is a stdlib token scan, so it must work with no parser at all."""
+    import sys
+
+    class _BlockPynescript:
+        """Meta path hook that makes ``pynescript`` unimportable."""
+
+        def find_spec(self, name, path=None, target=None):  # noqa: ANN001, ANN201
+            if name.split(".")[0] == "pynescript":
+                raise ImportError("pynescript intentionally absent")
+            return None
+
+    # ``pine_ast`` caches the availability verdict, so the transpiler modules have
+    # to be evicted as well; only ``pynescript`` is blocked, not our own package.
+    saved = {
+        name: module
+        for name, module in sys.modules.items()
+        if name.startswith("pynescript") or name.startswith("app.services.pine_transpiler")
+    }
+    for name in saved:
+        del sys.modules[name]
+    sys.meta_path.insert(0, _BlockPynescript())
+    try:
+        import importlib
+
+        module = importlib.import_module("app.services.pine_transpiler")
+        assert module.parser_available() is False
+
+        assessment = module.assess_migratability(EMA_CROSS)
+        assert 0 <= assessment["score"] <= 100
+        assert isinstance(assessment["blockers"], list)
+
+        # Transpiling degrades to a reported error instead of raising.
+        result = module.transpile_pine(EMA_CROSS)
+        assert result.ok is False
+        assert result.error == "parser_unavailable"
+        assert result.blockers == ["parser_unavailable"]
+        assert result.code is None
+    finally:
+        sys.meta_path = [hook for hook in sys.meta_path if not isinstance(hook, _BlockPynescript)]
+        for name in list(sys.modules):
+            if name.startswith("app.services.pine_transpiler"):
+                del sys.modules[name]
+        sys.modules.update(saved)
+
+
+def test_generated_source_survives_the_sandbox_safety_scan():
+    """Comments, docstrings and string literals must not trip the safety regexes.
+
+    The runtime scans raw source text, so an input titled ``RTH open (09:30)``
+    used to reject the whole module through the ``open(`` rule.
+    """
+    from app.utils.safe_exec import validate_code_safety
+
+    source = """
+//@version=5
+strategy("ORB open (09:30)", overlay=true)
+anchor = input.string("RTH open (09:30)", "Session anchor")
+if ta.crossover(close, ta.sma(close, 20))
+    strategy.entry("Long", strategy.long)
+"""
+    result = transpile_pine(source, name='ORB open (09:30) "quoted"')
+    assert result.ok, result.blockers
+
+    ok, reason = validate_code_safety(result.code)
+    assert ok, reason
+
+
+def test_na_state_slots_are_initialised_on_first_read():
+    """``na`` initialisers are stored as ``None`` and restored by the reader.
+
+    A module-level literal cannot hold ``float('nan')``; leaving ``None`` in the
+    slot would surface as ``'>=' not supported between NoneType and float``.
+    """
+    source = """
+//@version=5
+strategy("na slot")
+var float tracked = na
+tracked := nz(tracked[1], 1.0)
+if ta.crossover(close, ta.sma(close, 10)) and tracked > 0
+    strategy.entry("Long", strategy.long)
+"""
+    result = transpile_pine(source)
+    assert result.ok, result.blockers
+    assert "float('nan')" not in result.code.split("_STATE = ")[1].split("\n")[0]
+
+    import math
+
+    import pandas as pd
+
+    from app.services.strategy_v2 import StrategyV2BacktestRunner
+
+    prices = [100.0 + 10.0 * math.sin(index / 11.0) for index in range(400)]
+    opens = [prices[0]] + prices[:-1]
+    frame = pd.DataFrame(
+        {
+            "open": opens,
+            "high": [max(open_, close) * 1.004 for open_, close in zip(opens, prices)],
+            "low": [min(open_, close) * 0.996 for open_, close in zip(opens, prices)],
+            "close": prices,
+            "volume": [1000.0] * len(prices),
+        },
+        index=pd.date_range("2026-01-01", periods=len(prices), freq="h"),
+    )
+    output = StrategyV2BacktestRunner(
+        code=result.code, frames={"BTC/USDT": frame}, initial_capital=10000.0
+    ).run()
+    assert output["finalEquity"] > 0.0
+
+
+def test_scorer_never_imports_pynescript_at_module_scope():
     """The scorer is regex-based so callers can rank scripts without pynescript."""
     import app.services.pine_transpiler.assess as assess_module
 
-    source = assess_module.__file__
-    assert source is not None
+    assert assess_module.__file__ is not None
+    tree = ast.parse(open(assess_module.__file__, encoding="utf-8").read())
+    imported: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            imported.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module.split(".")[0])
+    assert "pynescript" not in imported
+
+
+def test_calendar_component_history_offsets_are_preserved():
+    """``month(time[1])`` must read the previous bar, not the current one.
+
+    Dropping the offset made ``new_month = month(time) != month(time[1])``
+    compare the component against itself. Because ``barstate.islast`` is
+    constant true in a finished-bar replay, strategies that guard an
+    accumulating array on ``new_month`` appended on every bar, which turned a
+    one-year backtest into a quadratic multi-minute hang.
+    """
+    source = """
+//@version=5
+strategy("Months", overlay=true)
+new_month = month(time) != month(time[1])
+if new_month
+    strategy.entry("Long", strategy.long)
+"""
+
+    result = transpile_pine(source)
+
+    assert result.ok, result.blockers
+    assert '_p_shift(_p_time_component("month"), 1)' in result.code
+    assert _compiles(result.code)

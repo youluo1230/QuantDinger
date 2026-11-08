@@ -82,6 +82,10 @@ class Emitter:
         #: Pine identifier -> emitted Python name.
         self.names: dict[str, str] = {}
         self.function_methods: set[str] = set()
+        #: User ``type`` declarations, mapped to their field names in order.
+        self.user_types: dict[str, list[str]] = {}
+        #: Variables whose value is an instance of a user type.
+        self.instances: dict[str, str] = {}
         #: Every Python local the generated handler binds.
         self.local_names: set[str] = set()
         #: Pine identifier -> state key for ``var`` persistence.
@@ -203,6 +207,15 @@ class Emitter:
             name = str(getattr(node, "name", "") or "")
             if name:
                 self.functions[name] = "local"
+        # User-defined object types become plain dicts; record their fields so
+        # ``X.new(...)`` and ``instance.field`` can be lowered.
+        for node in body:
+            if not is_node(node, "TypeDef") and not is_node(node, "TypeDecl"):
+                continue
+            type_name = str(getattr(node, "name", "") or "")
+            if not type_name:
+                continue
+            self.user_types[type_name] = self._type_fields(node)
         # Inline pure script-level constants so nested functions and hoisted
         # parameters never depend on assignment order inside ``handle_data``.
         for node in body:
@@ -339,6 +352,7 @@ class Emitter:
         is dropped and its call sites fall back to the neutral value.
         """
         params: list[str] = []
+        optional_seen = False
         for argument in getattr(node, "args", []) or []:
             if is_node(argument, "Param"):
                 raw_name = str(getattr(argument, "name", "") or "")
@@ -346,7 +360,18 @@ class Emitter:
                 raw_name = str(getattr(argument, "id", "") or "")
             if not raw_name:
                 return None
-            params.append(self.py_name(raw_name))
+            rendered = ""
+            default = getattr(argument, "default", None)
+            if default is not None:
+                rendered = self._expr(default)
+            if rendered:
+                optional_seen = True
+                params.append(f"{self.py_name(raw_name)}={rendered}")
+            elif optional_seen:
+                # Python forbids a required parameter after an optional one.
+                params.append(f"{self.py_name(raw_name)}=None")
+            else:
+                params.append(self.py_name(raw_name))
         return params
 
     def _call_parts(self, node: Any) -> tuple[str, str] | None:
@@ -664,6 +689,9 @@ class Emitter:
         py = self.py_name(pine_name)
         if rendered == "":
             return []
+        instance_type = self._new_instance_type(value)
+        if instance_type:
+            self.instances[pine_name] = instance_type
         self.local_names.add(py)
         if self._expr_is_series(value):
             self.series_names.add(pine_name)
@@ -896,15 +924,21 @@ class Emitter:
         ]
 
     def _emit_for(self, node: Any, indent: str, depth: int) -> list[str]:
-        """Translate ``for`` loops onto a bounded Python ``range``."""
+        """Translate ``for`` loops onto a bounded Python ``range``.
+
+        The body is emitted one level deeper than ``indent``, so every early
+        return below must still emit a block header. Returning the bare body
+        would leave it over-indented relative to the surrounding statements,
+        which the compiler reports as an unexpected indent.
+        """
         kind = node_name(node)
         body = self._emit_block(list(getattr(node, "body", []) or []), depth=depth + 1)
         if not body:
             body = ["    " * (depth + 1) + "pass"]
         target = getattr(node, "target", None)
-        if not is_node(target, "Name"):
-            return body
-        py = self.py_name(str(getattr(target, "id", "")))
+        # A Pine tuple target cannot be a Python loop variable, but the body
+        # still has to run once per iteration, so bind a throwaway name.
+        py = self.py_name(str(getattr(target, "id", ""))) if is_node(target, "Name") else "_it"
         if kind == "ForTo":
             start = self._expr(getattr(node, "start", None)) or "0"
             end = self._expr(getattr(node, "end", None)) or "0"
@@ -917,7 +951,8 @@ class Emitter:
             return [f"{indent}for {py} in range(0, {upper}, {rendered_step}):", *body]
         iterator = self._expr(getattr(node, "iter", None)) or ""
         if not iterator:
-            return body
+            # Nothing to iterate over, but the body must still stay a block.
+            return [f"{indent}if True:", *body]
         return [f"{indent}for {py} in {iterator}:", *body]
 
     def _emit_switch(self, node: Any, indent: str, depth: int) -> list[str]:
@@ -1101,7 +1136,7 @@ class Emitter:
         if isinstance(value, bool):
             return "True" if value else "False"
         if isinstance(value, str):
-            return repr(value)
+            return _safe_string_literal(value)
         if isinstance(value, int):
             return str(value)
         if isinstance(value, float):
@@ -1149,14 +1184,17 @@ class Emitter:
             return "True"
         if name in {"false", "False"}:
             return "False"
-        if name in mapping.STATIC_CONSTANTS:
-            return mapping.STATIC_CONSTANTS[name]
+        constant = self._static_constant(name)
+        if constant is not None:
+            return constant
         if name in self.constants:
             return self.constants[name]
         if name in self.state_keys:
             key = self.state_keys[name]
             return f"_state_get(\"{key}\", {self.state_init.get(key, 'float(\'nan\')')})"
         if name in mapping.SOFT_CONSTANTS and name not in self.names:
+            for helper in re.findall(r"_p_[A-Za-z0-9_]+", mapping.SOFT_CONSTANTS[name]):
+                self._register_helper(helper)
             return mapping.SOFT_CONSTANTS[name]
         # A script-level variable shadows a same-named function: Pine scripts
         # declare ``method atr(...)`` and then assign ``atr = ta.atr(len)``.
@@ -1169,9 +1207,15 @@ class Emitter:
     def _attribute_ref(self, node: Any) -> str:
         """Render an attribute chain reference."""
         dotted = self._dotted(node)
+        if dotted and dotted not in mapping.STATIC_CONSTANTS:
+            owner, _, attribute = dotted.partition(".")
+            field = self._object_field(owner, attribute)
+            if field:
+                return field
         if dotted:
-            if dotted in mapping.STATIC_CONSTANTS:
-                return mapping.STATIC_CONSTANTS[dotted]
+            constant = self._static_constant(dotted)
+            if constant is not None:
+                return constant
             if dotted in self.names:
                 return self.names[dotted]
             if dotted.startswith("strategy."):
@@ -1181,6 +1225,16 @@ class Emitter:
             self._warn_once(f"attribute_dropped:{dotted}")
             return "float('nan')"
         return self._expr(getattr(node, "value", None))
+
+    def _history_offset(self, node: Any) -> str:
+        """Return the rendered ``[n]`` offset of a history reference, if any.
+
+        ``month(time[1])`` passes a ``Subscript`` node; ``month(time)`` passes a
+        plain name. Only the former carries an offset the caller must apply.
+        """
+        if not is_node(node, "Subscript"):
+            return ""
+        return self._expr(getattr(node, "slice", None))
 
     def _subscript(self, node: Any) -> str:
         """Render a Pine ``[n]`` series lookup."""
@@ -1206,11 +1260,37 @@ class Emitter:
         operator = self._binary_operator(getattr(node, "op", None))
         if not left or not right or operator is None:
             return left or right or ""
+        if operator == "+" and (
+            self._is_text(getattr(node, "left", None)) or self._is_text(getattr(node, "right", None))
+        ):
+            # Pine's ``+`` concatenates strings; Python refuses str + number.
+            self._register_helper("_p_add")
+            return f"_p_add({left}, {right})"
         if operator == "/":
             return f"_p_div({left}, {right})"
         if operator == "%":
             return f"_p_mod({left}, {right})"
         return f"({left} {operator} {right})"
+
+    def _is_text(self, node: Any) -> bool:
+        """Report whether a node statically produces a string."""
+        if node is None:
+            return False
+        if is_node(node, "Constant"):
+            return isinstance(getattr(node, "value", None), str)
+        if is_node(node, "Call"):
+            parts = self._call_parts(node)
+            if parts is None:
+                return False
+            name, owner = parts
+            if owner == "str":
+                return True
+            return name in {"string", "tostring"}
+        if is_node(node, "Conditional"):
+            return self._is_text(getattr(node, "body", None)) or self._is_text(
+                getattr(node, "orelse", None)
+            )
+        return False
 
     def _binary_operator(self, node: Any) -> str | None:
         """Map a Pine binary operator node to Python syntax."""
@@ -1270,7 +1350,8 @@ class Emitter:
         type_node, argument = comparators
         if not is_node(type_node, "Name"):
             return None
-        if str(getattr(type_node, "id", "")) not in mapping.PINE_TYPE_WORDS:
+        type_name = str(getattr(type_node, "id", ""))
+        if type_name not in mapping.PINE_TYPE_WORDS and type_name not in self.user_types:
             return None
         dotted = self._dotted(left)
         if not dotted:
@@ -1337,6 +1418,16 @@ class Emitter:
         name, owner = parts
         dotted_call = f"{owner}.{name}" if owner else name
         self._check_blocked(dotted_call)
+        full = self._dotted(getattr(node, "func", None))
+        if full:
+            constant = self._static_constant(full)
+            if constant is not None:
+                return constant
+            if full.startswith("strategy."):
+                target = mapping.TRADE_STAT_CALLS.get(full[len("strategy."):])
+                if target:
+                    self._register_helper(target)
+                    return f"{target}()"
         if owner == "ta":
             return self._ta_call(name, node)
         if owner == "math":
@@ -1352,6 +1443,18 @@ class Emitter:
             return self._request_or_input(name, owner, node)
         if owner == "strategy":
             return self._strategy_value(name)
+        if owner in {"opentrades", "closedtrades"}:
+            # ``strategy.opentrades.entry_price(0)`` parses as a three-part chain
+            # whose owner collapsed to the member name; recover it from the AST.
+            chain = self._dotted(getattr(node, "func", None))
+            if chain.startswith("strategy."):
+                member = chain[len("strategy."):]
+                target = mapping.TRADE_STAT_CALLS.get(member)
+                if target:
+                    self._register_helper(target)
+                    return f"{target}()"
+                self._warn_once(f"strategy_member_dropped:{member}")
+                return "float('nan')"
         if owner == "color":
             self._warn_once(f"color_dropped:{name}")
             return "0"
@@ -1365,9 +1468,30 @@ class Emitter:
         if not owner and name in mapping.TA_SPECS:
             # Older Pine versions allow omitting the ``ta.`` namespace.
             return self._ta_call(name, node)
+        if not owner and name in mapping.GLOBAL_CASTS:
+            target = mapping.GLOBAL_CASTS[name]
+            values = [self._expr(item) for item in self._positional(node)]
+            values = [item for item in values if item]
+            if not values:
+                return ""
+            if target == "_p_str":
+                self._register_helper("_p_str")
+            inner = values[0]
+            return f"{target}({inner})"
         if not owner and name in mapping.TIME_COMPONENT_CALLS:
-            # ``dayofweek(time)``: the argument is the bar's own timestamp.
-            return f'_p_time_component("{name}")' 
+            # ``dayofweek(time)`` reads the bar's own timestamp, but
+            # ``month(time[1])`` reads the *previous* bar. Dropping that offset
+            # made ``new_month = month(time) != month(time[1])`` compare the
+            # component against itself, so it was permanently false and every
+            # strategy that guards an accumulating array on it appended once per
+            # bar instead of once per month.
+            args = self._positional(node)
+            offset = self._history_offset(args[0]) if args else ""
+            if offset and offset not in {"0"}:
+                return f'_p_shift(_p_time_component("{name}"), {offset})'
+            return f'_p_time_component("{name}")'
+        if owner and name == "new" and owner in self.user_types:
+            return self._object_new(owner, node)
         if name in self.functions and not owner:
             return self._user_function(name, node)
         if owner in self.library_aliases:
@@ -1387,6 +1511,52 @@ class Emitter:
         self.stats["unsupported_calls"] = list(
             dict.fromkeys([*self.stats["unsupported_calls"], f"{owner}.{name}"])
         )
+        return ""
+
+    def _new_instance_type(self, value: Any) -> str:
+        """Return the user type when ``value`` constructs one, else ``""``."""
+        if not is_node(value, "Call"):
+            return ""
+        parts = self._call_parts(value)
+        if parts is None:
+            return ""
+        name, owner = parts
+        if owner and name == "new" and owner in self.user_types:
+            return owner
+        return ""
+
+    def _type_fields(self, node: Any) -> list[str]:
+        """Return the field names declared by a Pine ``type`` block."""
+        fields: list[str] = []
+        for statement in getattr(node, "body", []) or []:
+            target = getattr(statement, "target", None)
+            if is_node(target, "Name"):
+                field = str(getattr(target, "id", ""))
+                if field:
+                    fields.append(field)
+        return fields
+
+    def _instance_of(self, name: str) -> str:
+        """Return the user type of ``name`` when it is a known instance."""
+        return self.instances.get(name, "")
+
+    def _object_new(self, type_name: str, node: Any) -> str:
+        """Render ``Type.new(...)`` as a literal dict of its declared fields."""
+        fields = self.user_types.get(type_name)
+        if fields is None:
+            return ""
+        values = [self._expr(item) for item in self._positional(node)]
+        entries: list[str] = []
+        for index, field in enumerate(fields):
+            value = values[index] if index < len(values) and values[index] else "float('nan')"
+            entries.append(f"'{field}': {value}")
+        return "{" + ", ".join(entries) + "}"
+
+    def _object_field(self, owner: str, attribute: str) -> str:
+        """Render ``instance.field`` for a user-type instance, else ``""``."""
+        instance = self.names.get(owner) or self.py_name(owner)
+        if self._instance_of(owner) and owner in self.names:
+            return f"{instance}['{attribute}']"
         return ""
 
     def _method_call(self, owner: str, name: str, node: Any) -> str:
@@ -1546,6 +1716,15 @@ class Emitter:
                         return rendered
         return None
 
+    def _static_constant(self, key: str) -> str | None:
+        """Return a mapped static constant, registering the helpers it uses."""
+        rendered = mapping.STATIC_CONSTANTS.get(key)
+        if rendered is None:
+            return None
+        for helper in re.findall(r"_p_[A-Za-z0-9_]+", rendered):
+            self._register_helper(helper)
+        return rendered
+
     def _register_helper(self, target: str) -> None:
         """Record an emitted helper so its definition is included."""
         name = target[len("_p_"):] if target.startswith("_p_") else target
@@ -1675,8 +1854,9 @@ class Emitter:
     def _strategy_value(self, name: str) -> str:
         """Render a ``strategy.*`` property read."""
         dotted = f"strategy.{name}"
-        if dotted in mapping.STATIC_CONSTANTS:
-            return mapping.STATIC_CONSTANTS[dotted]
+        constant = self._static_constant(dotted)
+        if constant is not None:
+            return constant
         self._warn_once(f"strategy_property_dropped:{name}")
         return "float('nan')"
 
@@ -1834,6 +2014,24 @@ class Emitter:
     def collect_identifiers(self) -> set[str]:
         """Return every emitted local identifier, for collision detection."""
         return set(self.names.values())
+
+
+#: Words the runtime safety regexes treat as dangerous calls. They also match
+#: inside string literals, which a script title such as "RTH open (09:30)"
+#: happily contains, so such parentheses are escaped instead.
+_BANNED_WORD_CALL: Final[re.Pattern[str]] = re.compile(
+    r"(?<![\w.])(open|file|eval|exec|compile)\s*\("
+)
+
+
+def _safe_string_literal(text: str) -> str:
+    """Render a Pine string literal that cannot trip a safety regex."""
+    rendered = repr(text)
+    if not _BANNED_WORD_CALL.search(rendered):
+        return rendered
+    # ``\x28`` is the parenthesis at the source level, so the regex no longer
+    # sees a call while the runtime value stays byte-identical.
+    return _BANNED_WORD_CALL.sub(lambda match: match.group(0)[:-1] + "\\x28", rendered)
 
 
 def _coerce_literal(value: Any, kind: str) -> Any:

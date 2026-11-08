@@ -479,7 +479,34 @@ def test_conversion_diagnostics_are_json_encodings(monkeypatch):
     assert json.loads(params[6]) == ["approx"]
     assert json.loads(params[7])["nested"]["value"] == 1
     assert "pine_transpiler" == params[2]
-    assert params[3] == pipeline_module.MIGRATABILITY_VERSION
+    # The conversion row records which generator produced the code, which is a
+    # different lifecycle from the assessor version: a transpiler fix has to
+    # regenerate sources while a scoring tweak must not.
+    assert params[3] == pipeline_module.TRANSPILER_VERSION
+
+
+def test_regenerating_code_clears_the_previous_run_id(monkeypatch):
+    """A stale run id must not survive regeneration.
+
+    The publish pass reuses ``backtest_run_id`` instead of re-running the
+    engine, so keeping an id from a run that measured different source would
+    advertise a result the current code never produced.
+    """
+
+    cursor = _install_db(monkeypatch, lambda query, params: [])
+
+    pipeline_module._record_conversion(
+        script_id_part="PUB;a",
+        source_id=3,
+        status="ready",
+        blockers=[],
+        warnings=[],
+        diagnostics={},
+        code_hash="h",
+    )
+
+    _sql, _params = cursor.executed[0]
+    assert "backtest_run_id = NULL" in _sql
 
 
 def test_pipeline_status_reports_empty_corpus(monkeypatch):
@@ -510,6 +537,53 @@ def test_backtest_range_is_legal_for_every_supported_frequency(frequency):
             market="Crypto",
             symbol=pipeline_module._DEFAULT_INSTRUMENT,
             timeframe=frequency,
+            start_date=start,
+            end_date=end,
+        )
+        is None
+    )
+
+
+def test_backtest_window_honours_the_configured_lookback(monkeypatch):
+    """Operators must be able to trade window length for queue throughput.
+
+    The engine's per-bar replay makes cost grow with the square of the window,
+    so the lookback is configuration rather than a constant.
+    """
+    from app.services.backtest_limits import validate_backtest_range
+
+    monkeypatch.setenv("TRADINGVIEW_BACKTEST_DAYS", "45")
+
+    start, end = pipeline_module._backtest_range("1h")
+
+    assert (end - start).days == 45
+    assert (
+        validate_backtest_range(
+            market="Crypto",
+            symbol=pipeline_module._DEFAULT_INSTRUMENT,
+            timeframe="1h",
+            start_date=start,
+            end_date=end,
+        )
+        is None
+    )
+
+
+def test_backtest_window_falls_back_when_the_lookback_is_illegal(monkeypatch):
+    """An over-long setting must be narrowed, not turned into a hard failure."""
+    from app.services.backtest_limits import validate_backtest_range
+
+    # ``5m`` is capped well below ten years by backtest_limits.
+    monkeypatch.setenv("TRADINGVIEW_BACKTEST_DAYS", "3650")
+
+    start, end = pipeline_module._backtest_range("5m")
+
+    assert start < end
+    assert (
+        validate_backtest_range(
+            market="Crypto",
+            symbol=pipeline_module._DEFAULT_INSTRUMENT,
+            timeframe="5m",
             start_date=start,
             end_date=end,
         )
@@ -680,3 +754,43 @@ def test_publishing_reuses_a_successful_run_instead_of_repeating_it(monkeypatch)
     assert runs == [], "an already-backtested row must not be re-run"
     assert result["published"] == 1
     assert published and published[0]["source_id"] == 3
+
+
+def test_a_strategy_that_exceeds_the_time_ceiling_is_parked_as_timeout(monkeypatch):
+    """A pathological strategy must not hold the batch hostage.
+
+    Generated code that rescans the whole history on every bar can take minutes
+    on a one-year window. The ceiling is per strategy, and the parking status is
+    distinct from ``backtest_failed`` because re-running a timeout unchanged
+    would burn exactly the same minutes again.
+    """
+    candidate = {
+        "script_id_part": "PUB;slow",
+        "source_id": 43,
+        "name": "slow",
+        "description": "",
+        "code": "def initialize(context):\n    pass\n",
+    }
+
+    def handler(query: str, params):
+        if "FROM qd_tv_conversions c" in query:
+            return [candidate]
+        return []
+
+    cursor = _install_db(monkeypatch, handler)
+
+    class _Service:
+        def run(self, **kwargs):
+            # The sandbox raises its own TimeoutError class, not the builtin.
+            from app.utils.safe_exec import TimeoutError as SandboxTimeoutError
+
+            raise SandboxTimeoutError("Code execution timed out after 300 seconds")
+
+    monkeypatch.setattr("app.services.strategy_v2.StrategyV2BacktestService", _Service)
+
+    result = pipeline_module.backtest_and_publish(limit=1, user_id=1, publish=False)
+
+    assert result["backtested"] == 0
+    parked = [item for item in cursor.executed if item[1] and item[1][0] == "timeout"]
+    assert parked, "a timed out strategy must be parked under its own status"
+    assert parked[0][1][-1] == "PUB;slow"

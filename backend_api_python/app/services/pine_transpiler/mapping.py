@@ -207,6 +207,7 @@ STATIC_CONSTANTS: Final[dict[str, str]] = {
     "timeframe.isdaily": "_TIMEFRAME_IS_DAILY",
     "timeframe.isweekly": "_TIMEFRAME_IS_WEEKLY",
     "timeframe.ismonthly": "_TIMEFRAME_IS_MONTHLY",
+    "timeframe.in_seconds": "_TIMEFRAME_SECONDS",
     "bar_index": "_bar_index",
     "time": "_time",
     "last_bar_index": "_bar_index",
@@ -306,6 +307,34 @@ STATIC_CONSTANTS.update(
 )
 
 #: ``math.*`` calls translated to numpy or helper expressions.
+#: Pine casts and object-style strategy counters. ``strategy.opentrades`` is an
+#: object in Pine, so ``strategy.opentrades.entry_price(n)`` arrives as a
+#: three-part call chain rather than a two-part one.
+GLOBAL_CASTS: Final[dict[str, str]] = {
+    "float": "_p_float",
+    "int": "_p_int",
+    "bool": "_p_bool",
+    "string": "_p_str",
+    "color": "_p_str",
+}
+
+#: ``strategy.opentrades.*`` and ``strategy.closedtrades.*`` member calls.
+TRADE_STAT_CALLS: Final[dict[str, str]] = {
+    "opentrades.entry_price": "_p_position_price",
+    "opentrades.size": "_p_position_size",
+    "opentrades.profit": "_p_position_profit",
+    "opentrades.entry_bar_index": "_p_position_entry_bar",
+    "closedtrades.profit": "_p_position_profit",
+    "closedtrades.win_count": "_p_win_trade_count",
+    "closedtrades.loss_count": "_p_loss_trade_count",
+}
+
+#: Scalar ``strategy.*`` counters.
+TRADE_STAT_VALUES: Final[dict[str, str]] = {
+    "opentrades": "_p_open_trade_count()",
+    "closedtrades": "_p_close_trade_count()",
+}
+
 MATH_CALLS: Final[dict[str, str]] = {
     "math.abs": "np.abs",
     "math.max": "np.maximum",
@@ -383,6 +412,11 @@ ARRAY_CALLS: Final[dict[str, str]] = {
     "array.lastindexof": "_p_array_lastindex",
     "array.includes": "_p_array_includes",
     "array.size": "len",
+    "array.slice": "_p_array_slice",
+    "array.join": "_p_array_join",
+    "array.concat": "_p_array_concat",
+    "array.insert": "_p_array_insert",
+    "array.fill": "_p_array_fill",
 }
 
 ARRAY_INTRINSICS: Final[dict[str, str]] = {

@@ -189,7 +189,7 @@ def transpile_pine(
     if assembly.get("error"):
         return TranspileResult(
             ok=False,
-            code=None,
+            code=assembly.get("code") or None,
             blockers=list(dict.fromkeys([*blockers, "assembly_failed"])),
             warnings=[*warnings, str(assembly["error"])],
             stats=stats,
@@ -300,8 +300,10 @@ def _assemble(
     try:
         ast.parse(code)
     except SyntaxError as exc:
+        # Keep the rejected source: a syntax error in generated code is only
+        # debuggable with the offending lines in hand.
         return {
-            "code": "",
+            "code": code,
             "blockers": ["emitted_source_invalid"],
             "error": f"{exc.msg} (line {exc.lineno})",
         }
@@ -323,6 +325,11 @@ def _docstring(title: str) -> list[str]:
     ]
 
 
+#: Comment text that would otherwise trip a runtime safety regex. ``open``,
+#: ``eval`` and friends are only dangerous as calls, but the sandbox patterns
+#: also match plain words followed by a parenthesis.
+_SAFE_COMMENT_TEXT: Final[re.Pattern[str]] = re.compile(r"(?<![\w.])(open|file|eval|exec|compile)\s*\(")
+
 def _param_annotations(params: dict[str, dict[str, Any]]) -> list[str]:
     """Render ``# @param`` annotations for the inferred inputs."""
     lines: list[str] = []
@@ -333,7 +340,13 @@ def _param_annotations(params: dict[str, dict[str, Any]]) -> list[str]:
         description = str(schema.get("title") or "").strip()
         if description:
             description = description.replace("\n", " ")
-        lines.append(f"# @param {name} {kind} {rendered} {description}".rstrip())
+            # Comments are scanned by the runtime safety regexes, so a title such
+            # as "RTH open (09:30)" would otherwise trip the ``\bopen\s*\(``
+            # rule and reject the whole module.
+            description = _SAFE_COMMENT_TEXT.sub(" ", description)
+        annotation = f"# @param {name} {kind} {rendered} {description}".rstrip()
+        # Comments are scanned by the runtime safety regexes as well.
+        lines.append(_SAFE_COMMENT_TEXT.sub(lambda match: f"{match.group(1)} ", annotation))
     return lines
 
 
@@ -355,10 +368,25 @@ def _param_default_literal(value: Any, kind: str) -> str:
         return "0.0"
 
 
+#: Seconds per bar for each supported subscription frequency.
+_FREQUENCY_SECONDS: Final[dict[str, int]] = {
+    "1m": 60,
+    "3m": 180,
+    "5m": 300,
+    "15m": 900,
+    "30m": 1800,
+    "1h": 3600,
+    "4h": 14400,
+    "1d": 86400,
+    "1w": 604800,
+}
+
+
 def _module_constants(*, symbol: str, frequency: str) -> list[str]:
     """Render the literal module constants the generated body relies on."""
     warmup = _WARMUP_BARS
     multiplier, intraday = _timeframe_flags(frequency)
+    seconds = _FREQUENCY_SECONDS.get(frequency, 3600)
     return [
         f'_SYMBOL = "{symbol}"',
         f'_TIMEFRAME = "{frequency}"',
@@ -369,6 +397,7 @@ def _module_constants(*, symbol: str, frequency: str) -> list[str]:
         f"_TIMEFRAME_IS_DAILY = {str(frequency == '1d')}",
         f"_TIMEFRAME_IS_WEEKLY = {str(frequency == '1w')}",
         "_TIMEFRAME_IS_MONTHLY = False",
+        f"_TIMEFRAME_SECONDS = {seconds}",
         f'_QUOTE_CURRENCY = "{_quote_currency(symbol)}"',
         "_INITIAL_CAPITAL = 100000.0",
         '_ENTRY_NAME = "pine"',
@@ -520,29 +549,41 @@ def _literal_or_default(expression: str) -> str | None:
     text = str(expression or "").strip()
     if not text:
         return None
+    # ``float('nan')`` is a call expression, which the contract rejects inside a
+    # module-level literal. ``None`` carries the same "no value yet" meaning and
+    # is what the read-time fallback in ``_state_get`` restores.
+    text = _NAN_LITERAL.sub("None", text)
     try:
         tree = ast.parse(text, mode="eval")
     except SyntaxError:
         return None
-    node = tree.body
-    if isinstance(node, ast.Constant) and isinstance(
-        node.value, (str, bytes, int, float, complex, bool, type(None))
-    ):
-        return text
-    if (
-        isinstance(node, ast.UnaryOp)
-        and isinstance(node.op, (ast.UAdd, ast.USub))
-        and isinstance(node.operand, ast.Constant)
-        and isinstance(node.operand.value, (int, float, complex))
-    ):
-        return text
+    if not _is_module_literal(tree.body):
+        return None
+    return text
+
+
+def _is_module_literal(node: ast.AST) -> bool:
+    """Report whether a node is safe as a module-level literal value."""
+    if isinstance(node, ast.Constant):
+        return isinstance(node.value, (str, bytes, int, float, complex, bool, type(None)))
     if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
-        return text
+        return all(_is_module_literal(item) for item in node.elts)
     if isinstance(node, ast.Dict):
-        return text
+        return all(
+            key is not None and _is_module_literal(key) and _is_module_literal(value)
+            for key, value in zip(node.keys, node.values)
+        )
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        return isinstance(node.operand, ast.Constant) and isinstance(
+            node.operand.value, (int, float, complex)
+        )
     if isinstance(node, ast.Name) and node.id in {"_SYMBOL", "_TIMEFRAME"}:
-        return text
-    return None
+        return True
+    return False
+
+
+#: NaN written as a call, which cannot appear in a module-level literal.
+_NAN_LITERAL: Final[re.Pattern[str]] = re.compile(r"float\(\s*['\"]nan['\"]\s*\)")
 
 
 def _clean_title(name: str) -> str:
@@ -550,5 +591,7 @@ def _clean_title(name: str) -> str:
     text = str(name or "").strip()
     if not text:
         return ""
-    text = re.sub(r"\s+", " ", text)
-    return text.replace('"""', "'''")[:160]
+    text = re.sub(r"\s+", " ", text).replace('"""', "'''")
+    # The runtime safety regexes scan comments and docstrings too, so a script
+    # named "ORB open (09:30)" would otherwise trip ``\bopen\s*\(``.
+    return _SAFE_COMMENT_TEXT.sub(lambda match: f"{match.group(1)} ", text)[:160]

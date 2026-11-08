@@ -14,7 +14,14 @@ from __future__ import annotations
 from typing import Final
 
 
-BASE_UTILS: Final[str] = '''def _p_div(numerator, denominator):
+BASE_UTILS: Final[str] = '''def _p_add(left, right):
+    """Pine ``+`` which also concatenates when either side is a string."""
+    if isinstance(left, str) or isinstance(right, str):
+        return _p_str(left) + _p_str(right)
+    return left + right
+
+
+def _p_div(numerator, denominator):
     """Divide the way Pine does: division by zero yields ``na``, not an error."""
     if hasattr(denominator, "replace"):
         return numerator / denominator.replace(0.0, float("nan"))
@@ -91,6 +98,15 @@ def _p_truth(value):
     return number != 0.0
 
 
+def _p_bool(value):
+    """Pine ``bool()`` cast that never raises on a series."""
+    last = _p_last(value)
+    try:
+        return bool(float(last))
+    except (TypeError, ValueError):
+        return bool(last)
+
+
 def _p_mask(condition):
     """Normalise a Pine boolean context to an elementwise mask."""
     if not hasattr(condition, "fillna"):
@@ -110,10 +126,27 @@ def _p_where(condition, when_true, when_false):
     if not hasattr(condition, "fillna"):
         return when_true if bool(condition) else when_false
     mask = _p_mask(condition)
-    if hasattr(when_false, "mask") and hasattr(when_false, "copy"):
-        result = when_false.copy()
+    true_series = hasattr(when_true, "fillna")
+    false_series = hasattr(when_false, "fillna")
+    if not true_series or not false_series:
+        # At least one branch is a scalar, which is how translated table cells
+        # and ``var`` resets are built. Resolving those through an ``object``
+        # Series allocated three full-length arrays per call; a converted
+        # strategy that redraws a table every bar spent minutes there. ``np.where``
+        # keeps the dtype numeric and never materialises Python objects.
         try:
-            return result.mask(mask, when_true)
+            left = when_true.to_numpy() if true_series else when_true
+            right = when_false.to_numpy() if false_series else when_false
+            if not isinstance(left, str) and not isinstance(right, str):
+                return pd.Series(
+                    np.where(mask.to_numpy(), left, right),
+                    index=condition.index,
+                )
+        except (TypeError, ValueError):
+            pass
+    if false_series and hasattr(when_false, "mask"):
+        try:
+            return when_false.copy().mask(mask, when_true)
         except (TypeError, ValueError):
             pass
     result = mask.astype("object").copy()
@@ -167,7 +200,7 @@ def _p_series(frame, column):
 def _p_time_series(frame):
     index = frame.index
     try:
-        stamps = index.astype("int64") // 1000000
+        stamps = index.asi8 // 1000
         return pd.Series(stamps, index=index, dtype="int64")
     except (TypeError, ValueError):
         return pd.Series(range(len(index)), index=index, dtype="int64")
@@ -262,7 +295,7 @@ def _p_timestamp(*parts):
         return float("nan")
     index = pd.DatetimeIndex(frame.index)
     if not parts:
-        return int(index[-1].value // 1000000)
+        return int(index.asi8[-1] // 1000)
     try:
         numbers = [int(_p_last(part)) for part in parts]
     except (TypeError, ValueError):
@@ -276,7 +309,7 @@ def _p_timestamp(*parts):
         stamp = pd.Timestamp(year=year, month=month, day=day, hour=hour, minute=minute)
     except (TypeError, ValueError):
         return float("nan")
-    return int(stamp.value // 1000000)
+    return int(stamp.timestamp() * 1000000)
 
 
 def _p_time(*parts):
@@ -289,27 +322,52 @@ def _p_time_series_value():
     if frame is None:
         return float("nan")
     index = pd.DatetimeIndex(frame.index)
-    return int(index[-1].value // 1000000)
+    return int(index.asi8[-1] // 1000)
+
+
+_TIME_COMPONENT_CACHE = {}
 
 
 def _p_time_component(name):
-    """Return a per-bar calendar component, matching Pine's time builtins."""
+    """Return a per-bar calendar component, matching Pine's time builtins.
+
+    Cached because generated strategies call this once per bar inside loops, and
+    rebuilding the field for the whole history on every call turned a single
+    backtest into a multi-minute hang. The key uses the window bounds rather
+    than ``id(frame)``, and no ``getattr`` is used, because the strategy
+    contract rejects any call whose name is not bound in the module.
+    """
     frame = _FRAME_REF[0]
     if frame is None:
         return pd.Series([float("nan")], dtype="float64")
-    index = pd.DatetimeIndex(frame.index)
-    parts = {
-        "year": index.year,
-        "month": index.month,
-        "dayofmonth": index.day,
-        "dayofweek": index.dayofweek,
-        "hour": index.hour,
-        "minute": index.minute,
-        "second": index.second,
-        "weekofyear": index.isocalendar().week,
-    }
-    values = parts.get(name, index.year)
-    return pd.Series(values, index=frame.index, dtype="float64")
+    index = frame.index
+    count = len(frame)
+    key = (count, index[0], index[-1], name) if count else (0, None, None, name)
+    cached = _TIME_COMPONENT_CACHE.get(key)
+    if cached is not None:
+        return cached
+    dates = pd.DatetimeIndex(index)
+    if name == "weekofyear":
+        values = dates.isocalendar().week
+    elif name == "dayofweek":
+        values = dates.dayofweek
+    elif name == "month":
+        values = dates.month
+    elif name == "dayofmonth":
+        values = dates.day
+    elif name == "hour":
+        values = dates.hour
+    elif name == "minute":
+        values = dates.minute
+    elif name == "second":
+        values = dates.second
+    else:
+        values = dates.year
+    series = pd.Series(values, index=index, dtype="float64")
+    if len(_TIME_COMPONENT_CACHE) > 64:
+        _TIME_COMPONENT_CACHE.clear()
+    _TIME_COMPONENT_CACHE[key] = series
+    return series
 
 
 def _p_bar_index_series(frame):
@@ -883,8 +941,13 @@ def _p_dmi(high, low, close, length, smoothing):
 '''
 
 STATE_SUPPORT: Final[str] = '''def _state_get(key, fallback):
-    """Read a persistent Pine ``var`` slot, initialising it on first use."""
-    if key not in _STATE:
+    """Read a persistent Pine ``var`` slot, initialising it on first use.
+
+    A ``None`` slot means "not initialised yet": the module-level literal cannot
+    hold ``float('nan')``, so ``na`` initialisers are stored as ``None`` and are
+    replaced by the first read. Pine has no null value, so nothing is lost.
+    """
+    if key not in _STATE or _STATE[key] is None:
         _STATE[key] = fallback
     return _STATE[key]
 
@@ -952,7 +1015,69 @@ def _p_position_price():
 
 
 def _p_open_trades():
-    return 1 if float(get_position(_SYMBOL).amount) != 0.0 else 0
+    position = get_position(_SYMBOL)
+    if position is None:
+        return 0
+    try:
+        return 1 if float(position.amount) != 0.0 else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def _p_int(value, default=0):
+    """Pine ``int()`` cast that tolerates ``na`` (it yields the default)."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if number != number or number in (float("inf"), float("-inf")):
+        return default
+    return int(number)
+
+
+def _p_float(value, default=None):
+    """Pine ``float()`` cast that tolerates non-numeric input."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float("nan") if default is None else default
+
+
+def _p_open_trade_count():
+    """Number of open positions (the runtime holds at most one)."""
+    return float(_p_open_trades())
+
+
+def _p_close_trade_count():
+    """Closed-trade count, read from the state slot the strategy maintains."""
+    return float(_STATE.get("closed_trades", 0.0))
+
+
+def _p_position_profit():
+    """Unrealised PnL of the open position in quote currency."""
+    position = get_position(_SYMBOL)
+    if position is None:
+        return float("nan")
+    try:
+        amount = float(position.amount)
+        cost = float(position.avg_cost)
+        last = float(position.last_price)
+    except (TypeError, ValueError):
+        return float("nan")
+    return (last - cost) * amount
+
+
+def _p_position_entry_bar():
+    """Bar index at which the current position was opened, if tracked."""
+    return float(_STATE.get("entry_bar", 0.0))
+
+
+def _p_win_trade_count():
+    return float(_STATE.get("win_trades", 0.0))
+
+
+def _p_loss_trade_count():
+    return float(_STATE.get("loss_trades", 0.0))
 
 
 def _p_col(frame, name):
@@ -972,6 +1097,15 @@ RUNTIME_HELPER_NAMES: Final[tuple[str, ...]] = (
     "position_size",
     "position_price",
     "open_trades",
+    "open_trade_count",
+    "close_trade_count",
+    "position_profit",
+    "position_entry_bar",
+    "win_trade_count",
+    "loss_trade_count",
+    "int",
+    "float",
+    "bool",
     "col",
 )
 
@@ -1049,6 +1183,42 @@ def _p_array_shift(values):
     if not values:
         return float("nan")
     return values.pop(0)
+
+
+def _p_array_slice(values, start=0, end=None):
+    if not isinstance(values, (list, tuple)):
+        return []
+    items = list(values)
+    first = max(0, int(float(start)))
+    if end is None:
+        return items[first:]
+    return items[first : int(float(end))]
+
+
+def _p_array_join(values, separator=","):
+    items = values if isinstance(values, (list, tuple)) else [values]
+    return str(separator).join(str(_p_last(item)) for item in items)
+
+
+def _p_array_concat(first, second):
+    left = list(first) if isinstance(first, (list, tuple)) else []
+    right = list(second) if isinstance(second, (list, tuple)) else []
+    return left + right
+
+
+def _p_array_insert(values, position, value):
+    if not isinstance(values, list):
+        return []
+    values.insert(int(float(position)), value)
+    return values
+
+
+def _p_array_fill(values, value):
+    if not isinstance(values, list):
+        return []
+    for index in range(len(values)):
+        values[index] = value
+    return values
 
 
 def _p_array_copy(values):
@@ -1139,7 +1309,8 @@ _GROUPS: Final[dict[str, tuple[str, ...]]] = {
         "array_shift", "array_unshift", "array_clear", "array_remove",
         "array_index", "array_lastindex", "array_includes", "array_stats",
         "array_copy", "array_sort", "array_last", "array_from",
-        "array_median", "array_range", "array_reverse",
+        "array_median", "array_range", "array_reverse", "array_slice",
+        "array_join", "array_concat", "array_insert", "array_fill",
     ),
     "runtime": RUNTIME_HELPER_NAMES,
     "state": (),
