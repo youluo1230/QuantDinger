@@ -10,6 +10,7 @@ strategy whose backtest failed.
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, List
 
@@ -542,6 +543,104 @@ def test_backtest_range_is_legal_for_every_supported_frequency(frequency):
         )
         is None
     )
+
+
+def test_backtest_window_accounts_for_the_declared_warmup():
+    """The engine validates the window *including* warmup bars.
+
+    Validating without them accepted a window the engine then rejected as
+    ``strategyV2.backtestRangeLimit``, which parked a strategy that was in fact
+    fine.
+    """
+    from app.services.backtest_limits import validate_backtest_range
+
+    start, end = pipeline_module._backtest_range("5m", warmup_bars=pipeline_module._WARMUP_BARS)
+
+    assert (
+        validate_backtest_range(
+            market="Crypto",
+            symbol=pipeline_module._DEFAULT_INSTRUMENT,
+            timeframe="5m",
+            start_date=start,
+            end_date=end,
+            warmup_bars=pipeline_module._WARMUP_BARS,
+            fetch_start=start,
+        )
+        is None
+    )
+
+
+def test_a_secondary_subscription_shrinks_the_window():
+    """A 1m subscription caps the window at a month, however long 1h allows.
+
+    The engine rejects the whole request when any subscribed timeframe exceeds
+    its cap, so a strategy that also subscribes to ``1m`` cannot be backtested
+    over the default 180 days.
+    """
+    from app.services.backtest_limits import validate_backtest_range
+
+    start, end = pipeline_module._backtest_range(
+        "1h", warmup_bars=pipeline_module._WARMUP_BARS, extra_frequencies=["1m"]
+    )
+
+    assert (end - start).days <= 30
+    for timeframe in ("1h", "1m"):
+        assert (
+            validate_backtest_range(
+                market="Crypto",
+                symbol=pipeline_module._DEFAULT_INSTRUMENT,
+                timeframe=timeframe,
+                start_date=start,
+                end_date=end,
+                warmup_bars=pipeline_module._WARMUP_BARS,
+                fetch_start=start,
+            )
+            is None
+        )
+
+
+def test_the_window_is_shrunk_by_the_warmup_the_engine_fetches():
+    """The engine validates the warmup it fetches ahead of the window.
+
+    A 30-day window plus a 19-day warmup is a 49-day request, which a ``1m``
+    subscription rejects. Shrinking here is what keeps the row out of a
+    ``backtestRangeLimit`` retry loop.
+    """
+    from app.services.backtest_limits import (
+        backtest_warmup_calendar_days,
+        validate_backtest_range,
+    )
+
+    start, end = pipeline_module._backtest_range(
+        "1h", warmup_bars=pipeline_module._WARMUP_BARS, extra_frequencies=["1m"]
+    )
+    fetch_start = start - timedelta(days=backtest_warmup_calendar_days("1h", pipeline_module._WARMUP_BARS))
+
+    assert (end - fetch_start).days <= 30
+    assert (
+        validate_backtest_range(
+            market="Crypto",
+            symbol=pipeline_module._DEFAULT_INSTRUMENT,
+            timeframe="1m",
+            start_date=start,
+            end_date=end,
+            warmup_bars=pipeline_module._WARMUP_BARS,
+            fetch_start=fetch_start,
+        )
+        is None
+    )
+
+
+def test_declared_frequencies_reads_every_subscription():
+    """The window resolution must see all subscriptions, not just the first."""
+    code = (
+        "def initialize(context):\n"
+        '    context.subscribe(frequency="1h")\n'
+        '    context.subscribe(frequency="1m")\n'
+    )
+
+    assert pipeline_module._declared_frequencies(code) == ["1h", "1m"]
+    assert pipeline_module._declared_frequencies("") == []
 
 
 def test_backtest_window_honours_the_configured_lookback(monkeypatch):

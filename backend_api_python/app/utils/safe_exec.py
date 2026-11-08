@@ -400,6 +400,14 @@ class _TimeoutWatchdog:
 
 _TIMEOUT_WATCHDOG = _TimeoutWatchdog()
 
+#: Live ``timeout_context`` ceilings as ``(deadline, seconds)`` pairs.
+#:
+#: Nested calls share the process's single SIGALRM. Without this stack an inner
+#: context cleared the alarm on exit, which silently cancelled an outer, longer
+#: ceiling: a caller that wrapped a whole multi-minute operation lost its bound
+#: as soon as the code inside it entered any nested timed block.
+_ALARM_DEADLINES: "list[tuple[float, int]]" = []
+
 
 def _assign_windows_process_memory_job(proc: Any, max_memory_mb: int) -> Any:
     """Put a child process in a Windows job with a hard memory ceiling."""
@@ -488,7 +496,17 @@ def timeout_context(seconds: int):
     # Strategy 1: Unix SIGALRM (most reliable, main thread only)
     if sys.platform != 'win32' and is_main_thread:
         def timeout_handler(signum, frame):
-            raise TimeoutError(f"Code execution timed out after {seconds} seconds")
+            expired = min(_ALARM_DEADLINES)[1] if _ALARM_DEADLINES else int(seconds)
+            raise TimeoutError(f"Code execution timed out after {expired} seconds")
+
+        def arm() -> None:
+            """Point the shared alarm at the earliest live deadline."""
+            if not _ALARM_DEADLINES:
+                signal.alarm(0)
+                return
+            remaining = min(deadline for deadline, _ in _ALARM_DEADLINES) - time.monotonic()
+            signal.alarm(max(1, int(remaining)) if remaining > 0 else 1)
+
         try:
             old_handler = signal.signal(signal.SIGALRM, timeout_handler)
         except ValueError:
@@ -496,12 +514,16 @@ def timeout_context(seconds: int):
             # runtimes.  Do not catch ValueError raised by the user program.
             pass  # fall through to watchdog strategy
         else:
-            signal.alarm(max(1, int(seconds)))
+            _ALARM_DEADLINES.append((time.monotonic() + max(1, int(seconds)), int(seconds)))
+            arm()
             try:
                 yield
             finally:
-                signal.alarm(0)
+                if _ALARM_DEADLINES:
+                    _ALARM_DEADLINES.pop()
                 signal.signal(signal.SIGALRM, old_handler)
+                # Restore the enclosing ceiling rather than clearing it.
+                arm()
             return
 
     # Strategy 2: one process-wide watchdog + async exception (cross-platform).

@@ -26,8 +26,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
@@ -60,6 +61,10 @@ MIN_PUBLISH_TRADES = max(1, int(os.getenv("TRADINGVIEW_MIN_TRADES", "3")))
 # batch, so each backtest gets a hard ceiling and is parked as ``timeout`` when
 # it exceeds it.
 BACKTEST_TIMEOUT_SEC = max(60, int(os.getenv("TRADINGVIEW_BACKTEST_TIMEOUT_SEC", "300")))
+#: Warmup bars declared by every generated strategy. Kept here as well because
+#: the backtest window must be validated *including* this warmup; validating
+#: without it accepted windows the engine then rejected as ``backtestRangeLimit``.
+_WARMUP_BARS = 300
 
 
 def _assess_module():
@@ -606,7 +611,22 @@ def convert_pending_scripts(
     return summary
 
 
-def _backtest_range(frequency: str) -> tuple[datetime, datetime]:
+#: ``context.subscribe(frequency="...")`` as emitted by the transpiler.
+_SUBSCRIBE_PATTERN = re.compile(r"""context\.subscribe\(\s*frequency\s*=\s*["']([^"']+)["']""")
+
+#: Frequencies a strategy declares. Read from the generated source rather than
+#: from ``compile_strategy_v2`` because this runs inside a loop over candidates
+#: and a full compile per candidate is far more expensive than a regex.
+def _declared_frequencies(code: str) -> List[str]:
+    return [item for item in dict.fromkeys(_SUBSCRIBE_PATTERN.findall(code or "")) if item]
+
+
+def _backtest_range(
+    frequency: str,
+    *,
+    warmup_bars: int = 0,
+    extra_frequencies: Sequence[str] = (),
+) -> tuple[datetime, datetime]:
     """Return a legal backtest window for the configured frequency.
 
     ``app/services/backtest_limits.py`` rejects windows longer than the
@@ -619,6 +639,15 @@ def _backtest_range(frequency: str) -> tuple[datetime, datetime]:
     a longer window than it does with a shorter one, but it can easily take
     minutes instead of seconds, which is the difference between a nightly job
     that drains its queue and one that never finishes.
+
+    ``warmup_bars`` must be supplied because the engine validates the window
+    including the warmup it will fetch ahead of the first bar. Checking without
+    it accepted windows that the engine then rejected as ``backtestRangeLimit``.
+
+    ``extra_frequencies`` covers strategies that subscribe to more than one
+    timeframe. Each subscription carries its own cap — ``1m`` is limited to a
+    month while ``1h`` allows years — and the engine rejects the request if any
+    subscription exceeds its cap, so the window has to be legal for all of them.
     """
     from app.services.backtest_limits import validate_backtest_range
 
@@ -626,17 +655,31 @@ def _backtest_range(frequency: str) -> tuple[datetime, datetime]:
     preferred = max(7, int(os.getenv("TRADINGVIEW_BACKTEST_DAYS", "180")))
     # Never exceed the shortest legal cap for the frequency, and fall back to
     # narrower windows if the configured one is rejected.
-    candidates = [preferred] + [days for days in (365, 180, 90, 30) if days < preferred]
+    ladder = (365, 180, 90, 60, 45, 30, 21, 14, 10, 7)
+    candidates = [preferred] + [days for days in ladder if days < preferred]
+    from app.services.backtest_limits import backtest_warmup_calendar_days
+
+    timeframes = [frequency, *(item for item in extra_frequencies if item)]
+    # The engine fetches the warmup *before* the window and validates that wider
+    # range, so the window has to be shrunk by the same amount here. Ignoring it
+    # produced windows that passed this check and still failed inside the engine.
+    warmup_days = backtest_warmup_calendar_days(frequency, warmup_bars)
     for days in candidates:
         start = end - timedelta(days=days)
-        error = validate_backtest_range(
-            market="Crypto",
-            symbol=_DEFAULT_INSTRUMENT,
-            timeframe=frequency,
-            start_date=start,
-            end_date=end,
-        )
-        if not error:
+        fetch_start = start - timedelta(days=warmup_days)
+        errors = [
+            validate_backtest_range(
+                market="Crypto",
+                symbol=_DEFAULT_INSTRUMENT,
+                timeframe=timeframe,
+                start_date=start,
+                end_date=end,
+                warmup_bars=warmup_bars,
+                fetch_start=fetch_start,
+            )
+            for timeframe in dict.fromkeys(timeframes)
+        ]
+        if not any(errors):
             return start, end
     return end - timedelta(days=30), end
 
@@ -691,7 +734,6 @@ def backtest_and_publish(
     # marketplace service, and doing so eagerly made ``publish=False`` pay for
     # expensive eager state it never used.
     community = get_community_service() if publish else None
-    start, end = _backtest_range(_DEFAULT_FREQUENCY)
     results: List[Dict[str, Any]] = []
     published = 0
 
@@ -704,7 +746,15 @@ def backtest_and_publish(
             # and idempotent instead of re-backtesting every time.
             run_id = int(row["backtest_run_id"])
             result = _stored_run_result(run_id)
+            start, end = None, None
         else:
+            # Resolved per strategy: a converted script may subscribe to several
+            # timeframes, and each carries its own window cap.
+            start, end = _backtest_range(
+                _DEFAULT_FREQUENCY,
+                warmup_bars=_WARMUP_BARS,
+                extra_frequencies=_declared_frequencies(code),
+            )
             try:
                 with timeout_context(BACKTEST_TIMEOUT_SEC):
                     run_id, result = service.run(
@@ -743,6 +793,11 @@ def backtest_and_publish(
             "source_id": source_id,
             "script_id_part": row["script_id_part"],
             "run_id": run_id,
+            "range": (
+                {"start": start.isoformat(), "end": end.isoformat()}
+                if start is not None and end is not None
+                else None
+            ),
             "totalTrades": trades,
             "totalReturn": result.get("totalReturn"),
             "sharpeRatio": result.get("sharpeRatio"),
@@ -819,12 +874,16 @@ def backtest_and_publish(
 
         results.append(summary)
 
+    # Each strategy resolves its own window (a secondary subscription can shorten
+    # it), so the batch reports the span it actually covered rather than one
+    # hard-coded range that was true for nobody.
+    spans = [item["range"] for item in results if item.get("range")]
     output = {
         "requested": limit,
         "backtested": len([item for item in results if item.get("run_id")]),
         "published": published,
         "skipped": len([item for item in results if item.get("skipped")]),
-        "range": {"start": start.isoformat(), "end": end.isoformat()},
+        "range": spans[0] if spans else None,
         "results": results,
     }
     logger.info("TradingView backtest/publish batch finished: %s", output)

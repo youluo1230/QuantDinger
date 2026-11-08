@@ -490,3 +490,26 @@ def test_private_numpy_namespace_is_allowed_but_io_still_rejected():
     # The documented IO escapes must keep failing.
     assert _dangerous_pd_numpy_import('pandas.io') == 'pandas.io'
     assert _dangerous_pd_numpy_import('numpy._np_utils') == 'numpy._np_utils'
+
+
+def test_nested_timeout_contexts_restore_the_enclosing_ceiling():
+    """An inner timed block must not cancel an outer deadline.
+
+    ``timeout_context`` is used both for short per-call limits and for long
+    ceilings around a whole multi-minute operation. Before nested contexts
+    were tracked, the inner block cleared the process alarm on exit, which
+    silently removed the outer bound exactly when it was most needed.
+    """
+    from app.utils import safe_exec as module
+
+    seen = []
+    with module.timeout_context(120):
+        outer_deadline = module._ALARM_DEADLINES[-1][0]
+        with module.timeout_context(5):
+            seen.append(len(module._ALARM_DEADLINES))
+        # The outer ceiling is still registered after the inner block exits.
+        restored = module._ALARM_DEADLINES[-1][0]
+        seen.append(len(module._ALARM_DEADLINES))
+    assert seen == [2, 1]
+    assert abs(restored - outer_deadline) < 1.0
+    assert module._ALARM_DEADLINES == []
