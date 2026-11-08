@@ -80,7 +80,13 @@ COPY docker-entrypoint.sh /usr/local/bin/
 RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh \
     && chmod +x /usr/local/bin/docker-entrypoint.sh
 
-RUN mkdir -p logs data/memory \
+# ``COPY`` preserves the source mode bits, so a checkout with a restrictive
+# umask produced an image whose /app the runtime user (uid 10001) could not
+# read, and every service failed with "No module named 'app.commands'". The
+# application tree is normalised here so the image does not depend on how the
+# builder's working copy happens to be permissioned.
+RUN chmod -R a+rX /app \
+    && mkdir -p logs data/memory \
     && chown -R quantdinger:quantdinger /app/logs /app/data
 
 EXPOSE 5000
