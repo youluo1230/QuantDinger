@@ -1373,6 +1373,13 @@ def backtest_and_publish(
                     status="timeout" if timed_out else "backtest_failed",
                     diagnostics={"error": str(exc)[:2000]},
                 )
+                # A strategy that no longer backtests must not stay advertised on
+                # the strength of a run that was made against different code.
+                _delist_rejected_templates(
+                    user_id,
+                    source_id,
+                    reason="Backtest no longer succeeds",
+                )
                 continue
 
         trades = int(result.get("totalTrades") or 0)
@@ -1407,6 +1414,11 @@ def backtest_and_publish(
                 status="no_trades",
                 backtest_run_id=run_id,
                 diagnostics={"totalTrades": trades, "minTrades": MIN_PUBLISH_TRADES},
+            )
+            _delist_rejected_templates(
+                user_id,
+                source_id,
+                reason="Backtest no longer trades",
             )
             continue
 

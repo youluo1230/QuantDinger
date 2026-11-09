@@ -1382,3 +1382,50 @@ def test_every_retry_window_is_shortened_until_one_works(monkeypatch):
 
     spans = [(end_ - start_).days for start_, end_ in seen]
     assert spans == sorted(spans, reverse=True), f"windows must shrink: {spans}"
+
+
+def test_a_strategy_that_stops_backtesting_is_withdrawn(monkeypatch):
+    """An advertised strategy whose new backtest fails must not stay listed.
+
+    The listing was made against different code, so keeping it up advertises a
+    result that no longer applies.
+    """
+    candidate = {
+        "script_id_part": "PUB;broken",
+        "source_id": 11,
+        "status": "ready",
+        "backtest_run_id": None,
+        "name": "broken",
+        "description": "",
+        "code": 'def initialize(context):\n    pass\n',
+    }
+
+    def handler(query: str, params):
+        if "FROM qd_tv_conversions c" in query:
+            return [candidate]
+        return []
+
+    cursor = _install_db(monkeypatch, handler)
+
+    class _Service:
+        @staticmethod
+        def run(**kwargs):
+            raise NameError("name 'vwap' is not defined")
+
+    class _Community:
+        def publish_script_template_from_strategy(self, **kwargs):
+            raise AssertionError("a failed backtest must not publish")
+
+    monkeypatch.setattr(
+        "app.services.strategy_v2.StrategyV2BacktestService", lambda: _Service()
+    )
+    monkeypatch.setattr(
+        "app.services.community_service.get_community_service", lambda: _Community()
+    )
+
+    pipeline_module.backtest_and_publish(limit=1, user_id=1, min_score=0, publish=True)
+
+    delisted = [
+        item for item in cursor.executed if item[1] and "script_template" in str(item[0])
+    ]
+    assert delisted, f"a failed backtest must withdraw the listing; executed={cursor.executed}"
