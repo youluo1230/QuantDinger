@@ -1010,3 +1010,139 @@ def test_a_missing_metric_does_not_silently_reject(monkeypatch):
 
     assert result["published"] == 1
     assert len(published) == 1
+
+
+@pytest.mark.parametrize(
+    "interval,expected",
+    [
+        ("60", "1h"),
+        ("1D", "1d"),
+        ("D", "1d"),
+        ("15", "15m"),
+        ("5", "5m"),
+        ("240", "4h"),
+        ("1W", "1w"),
+        # Upstream sometimes writes a full unit instead of the bare count.
+        ("60m", "1h"),
+        ("1h", "1h"),
+        ("4h", "4h"),
+    ],
+)
+def test_published_intervals_map_onto_the_subscription_grid(interval, expected):
+    """TradingView's interval tokens must resolve to a real subscription."""
+    assert pipeline_module._frequency_for_interval(interval) == expected
+
+
+@pytest.mark.parametrize(
+    "interval,expected",
+    [
+        ("1h", "1h"),
+        ("4h", "4h"),
+        ("6h", "4h"),
+        ("1D", "1d"),
+        ("2D", "1d"),
+        ("1W", "1w"),
+        ("W", "1w"),
+        # Two-day bars have no runtime equivalent; daily is the nearest grid
+        # point, and far closer than falling back to an hourly default.
+        ("2D", "1d"),
+    ],
+)
+def test_unit_suffixed_intervals_resolve_case_sensitively(interval, expected):
+    """``1M`` is one month but ``1m`` is one minute, so case carries meaning."""
+    assert pipeline_module._frequency_for_interval(interval) == expected
+
+
+@pytest.mark.parametrize("interval", ["", None, "1M", "M", "nonsense"])
+def test_unsupported_intervals_fall_back_to_the_configured_default(interval):
+    """The runtime only supports a fixed grid, so unmappable intervals fall back.
+
+    Silently rounding 45 minutes to an hour would measure a different strategy;
+    using the configured default at least matches the previous behaviour and is
+    visible in the conversion diagnostics.
+    """
+    assert pipeline_module._frequency_for_interval(interval) == pipeline_module._DEFAULT_FREQUENCY
+
+
+def test_a_strategy_is_translated_onto_the_interval_it_was_published_for(monkeypatch):
+    """The harvested interval, not the configured default, drives the transpile.
+
+    A 15-minute strategy measured on hourly bars is a different strategy.
+    """
+    captured = {}
+
+    class _Transpiler:
+        @staticmethod
+        def transpile_pine(source, **kwargs):
+            captured.update(kwargs)
+            return _Result(ok=False, error="stop here")
+
+    monkeypatch.setattr(pipeline_module, "_assess_module", lambda: _Transpiler())
+    _install_db(
+        monkeypatch,
+        _candidate_handler(
+            [
+                {
+                    "id": 1,
+                    "script_id_part": "PUB;scalp",
+                    "name": "scalp",
+                    "author": "a",
+                    "source_code": "src",
+                    "chart_interval": "15",
+                }
+            ]
+        ),
+    )
+
+    pipeline_module.convert_pending_scripts(limit=1, user_id=1, min_score=0)
+
+    assert captured["timeframe"] == "15m"
+
+
+def test_the_backtest_window_follows_the_generated_code_not_the_default(monkeypatch):
+    """The window must match the frequency the generated code subscribes to.
+
+    Validating a 1m strategy against the hourly cap would request a window the
+    engine then rejects.
+    """
+    assert pipeline_module._driving_frequency(
+        'context.subscribe(frequency="5m")\n'
+    ) == ("5m", [])
+    # Shortest wins, matching the engine, regardless of authoring order.
+    primary, extras = pipeline_module._driving_frequency(
+        'context.subscribe(frequency="1h")\ncontext.subscribe(frequency="1m")\n'
+    )
+    assert primary == "1m"
+    assert extras == ["1h"]
+    assert pipeline_module._driving_frequency("") == (
+        pipeline_module._DEFAULT_FREQUENCY,
+        [],
+    )
+
+
+@pytest.mark.parametrize(
+    "interval,expected",
+    [
+        # Real tokens observed in the feed that have no exact grid match.
+        ("9", "5m"),   # 4 minutes from 5m, 6 from 15m
+        ("10", "5m"),  # equidistant from 5m and 15m, tie goes to the shorter bar
+        ("21", "15m"),
+        ("45", "30m"),
+        ("180", "4h"),
+        ("480", "4h"),
+        ("8h", "4h"),
+        ("12h", "4h"),
+    ],
+)
+def test_off_grid_intervals_snap_to_the_nearest_subscription(interval, expected):
+    """An 8-hour strategy on 4-hour bars is off by 2x; on the 1h default, 8x."""
+    assert pipeline_module._frequency_for_interval(interval) == expected
+
+
+def test_the_nearest_grid_prefers_the_shorter_bar_on_a_tie():
+    """Between two equally distant grids, the shorter bar keeps more detail."""
+    # 10 minutes is 5 away from both 5m and 15m; the shorter bar wins.
+    assert pipeline_module._nearest_grid_frequency(10) == "5m"
+    # 120 minutes is 60 away from 1h and 120 away from 4h: nearest, not a tie.
+    assert pipeline_module._interval_minutes("2h") == 120
+    assert pipeline_module._nearest_grid_frequency(120) == "1h"

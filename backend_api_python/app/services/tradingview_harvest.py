@@ -144,6 +144,21 @@ def _access_label(raw: Any) -> str:
     return "open" if text.startswith("open") else text
 
 
+def _interval_label(raw: Any) -> str:
+    """Normalise ``symbol.interval`` into the token TradingView publishes.
+
+    The feed reports chart intervals as raw TradingView tokens: minutes as a
+    bare number of minutes (``60``), everything else as a unit-suffixed token
+    (``1D``, ``1W``, ``15``). They are stored verbatim rather than mapped to a
+    Strategy V2 frequency here, because the mapping depends on the subscription
+    grid and belongs with the thing that emits ``context.subscribe``.
+    """
+    text = str(raw or "").strip()
+    # Guard against a malformed feed returning something unusable: the column is
+    # VARCHAR(16) and a length overrun would fail the whole batch insert.
+    return text[:16]
+
+
 def _pine_version_of(source: str) -> Optional[int]:
     match = re.search(r"//\s*@version\s*=\s*(\d+)", source or "", re.IGNORECASE)
     if not match:
@@ -176,6 +191,10 @@ def _item_to_row(topic: str, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "chart_url": str(item.get("chart_url") or ""),
         "source_url": str(item.get("chart_url") or ""),
         "symbol_name": str(symbol.get("name") or "")[:120],
+        # TradingView reports the interval the author published the script on.
+        # It is the only upstream signal about the timeframe the strategy was
+        # written for, so it is kept verbatim and normalised later.
+        "chart_interval": _interval_label(symbol.get("interval")),
         "likes_count": max(0, int(item.get("likes_count") or 0)),
         "views_count": max(0, int(item.get("views_count") or 0)),
         "comments_count": max(0, int(item.get("comments_count") or 0)),
@@ -290,9 +309,10 @@ def _finish_run(run_id: int, status: str, result: Dict[str, Any]) -> None:
 _UPSERT_DISCOVERY_SQL = """
 INSERT INTO qd_tv_scripts (
     script_id_part, name, description, author, topic, tv_script_type,
-    script_access, chart_url, source_url, symbol_name, likes_count,
-    views_count, comments_count, is_picked, tv_created_at, tv_updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    script_access, chart_url, source_url, symbol_name, chart_interval,
+    likes_count, views_count, comments_count, is_picked, tv_created_at,
+    tv_updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (script_id_part) DO UPDATE SET
     name = EXCLUDED.name,
     description = EXCLUDED.description,
@@ -303,6 +323,12 @@ ON CONFLICT (script_id_part) DO UPDATE SET
     chart_url = EXCLUDED.chart_url,
     source_url = EXCLUDED.source_url,
     symbol_name = EXCLUDED.symbol_name,
+    -- Keep a previously recorded interval: a topic feed sometimes omits it, and
+    -- losing a known timeframe is worse than keeping a stale-but-correct one.
+    chart_interval = CASE
+        WHEN EXCLUDED.chart_interval = '' THEN qd_tv_scripts.chart_interval
+        ELSE EXCLUDED.chart_interval
+    END,
     likes_count = GREATEST(qd_tv_scripts.likes_count, EXCLUDED.likes_count),
     views_count = GREATEST(qd_tv_scripts.views_count, EXCLUDED.views_count),
     comments_count = GREATEST(qd_tv_scripts.comments_count, EXCLUDED.comments_count),
@@ -337,6 +363,7 @@ def upsert_discovered(rows: List[Dict[str, Any]]) -> int:
                         row["chart_url"],
                         row["source_url"],
                         row["symbol_name"],
+                        row["chart_interval"],
                         row["likes_count"],
                         row["views_count"],
                         row["comments_count"],

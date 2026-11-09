@@ -2059,6 +2059,7 @@ CREATE TABLE IF NOT EXISTS qd_tv_scripts (
     chart_url TEXT NOT NULL DEFAULT '',
     source_url TEXT NOT NULL DEFAULT '',
     symbol_name VARCHAR(120) NOT NULL DEFAULT '',
+    chart_interval VARCHAR(16) NOT NULL DEFAULT '',
     pine_version INTEGER,
     source_code TEXT NOT NULL DEFAULT '',
     source_chars INTEGER NOT NULL DEFAULT 0,

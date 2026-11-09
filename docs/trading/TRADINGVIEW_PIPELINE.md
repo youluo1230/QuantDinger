@@ -75,11 +75,11 @@ See `.env.example` for the full variable list. The important ones:
 | `TRADINGVIEW_HARVEST_MAX_SOURCES` | `60` | Source fetches per run. |
 | `TRADINGVIEW_MIN_SCORE` | `70` | Candidates below this are staged but never converted. |
 | `TRADINGVIEW_MIN_TRADES` | `3` | Minimum trades before a strategy may be listed. |
-| `TRADINGVIEW_TRANSPILER_VERSION` | `4` | Bump to regenerate sources after transpiler changes. |
+| `TRADINGVIEW_TRANSPILER_VERSION` | `5` | Bump to regenerate sources after transpiler changes. Version 5 translates onto the interval upstream published, so everything generated earlier sits on the wrong frequency grid. |
 | `TRADINGVIEW_BACKTEST_TIMEOUT_SEC` | `300` | Per-strategy backtest ceiling; slow scripts become `timeout`. |
 | `TRADINGVIEW_BACKTEST_DAYS` | `180` | Backtest lookback. Cost grows with the square of the window, so a longer window is rarely worth the queue time. |
 | `TRADINGVIEW_DEFAULT_INSTRUMENT` | `BTC/USDT` | Instrument used for verification backtests. |
-| `TRADINGVIEW_DEFAULT_FREQUENCY` | `1h` | Frequency used for verification backtests. |
+| `TRADINGVIEW_DEFAULT_FREQUENCY` | `1h` | Fallback only. Strategies are translated onto the interval TradingView published them on; this applies when upstream publishes no usable interval. |
 | `TRADINGVIEW_CONVERT_USER_ID` | `1` | Owner of the generated strategy sources. |
 
 ## Operating notes
@@ -117,6 +117,19 @@ See `.env.example` for the full variable list. The important ones:
   intended way to tighten the market; lowering them re-admits rejects on the
   next publish pass, since `below_threshold` rows stay out of the queue until
   their status is reset to `ready`.
+- **The interval comes from upstream, not from the code.** TradingView reports
+  the chart interval the author published each script on (`symbol.interval`, for
+  example `60` or `1D`). That is the only evidence about the timeframe a
+  strategy was designed for, so conversion translates onto it: a 15-minute
+  scalper is measured on 15-minute bars instead of inheriting a global hourly
+  default. Tokens outside the subscription grid snap to the nearest grid point
+  (an 8-hour strategy becomes 4-hour, which is 2x off; inheriting the hourly
+  default would be 8x off). Tokens with no duration at all — a monthly `1M`, or
+  a value the feed does not normally emit — fall back to
+  `TRADINGVIEW_DEFAULT_FREQUENCY`. Because the grid now varies per strategy, the
+  backtest window does too: a 1m strategy can only be measured over weeks while
+  a 1h strategy gets months, so **returns across listings are not directly
+  comparable** and the marketplace score inherits that caveat.
 - **Licensing.** TradingView code is readable by anyone but not freely
   redistributable. Generated strategies are derived works; keep the original
   script URL (stored in `chart_url`) with the listing so attribution is

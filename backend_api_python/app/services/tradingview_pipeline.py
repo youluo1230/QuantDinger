@@ -28,7 +28,7 @@ import json
 import os
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
@@ -46,10 +46,46 @@ MIGRATABILITY_VERSION = max(1, int(os.getenv("TRADINGVIEW_ASSESS_VERSION", "1"))
 # Keeping it separate from MIGRATABILITY_VERSION matters: scoring tweaks must not
 # rewrite every generated strategy, and transpiler fixes must not silently
 # backtest yesterday's output.
-TRANSPILER_VERSION = max(1, int(os.getenv("TRADINGVIEW_TRANSPILER_VERSION", "4")))
+# Version 5 translates onto the interval TradingView published instead of the
+# configured default, so every earlier row was generated on the wrong grid and
+# has to be regenerated rather than reused.
+TRANSPILER_VERSION = max(1, int(os.getenv("TRADINGVIEW_TRANSPILER_VERSION", "5")))
 
 _DEFAULT_INSTRUMENT = os.getenv("TRADINGVIEW_DEFAULT_INSTRUMENT", "BTC/USDT")
 _DEFAULT_FREQUENCY = os.getenv("TRADINGVIEW_DEFAULT_FREQUENCY", "1h")
+#: Map TradingView's published chart interval onto the subscription grid this
+#: runtime supports. The feed reports minutes as a bare count and everything
+#: else with a unit suffix, which is not what ``context.subscribe`` accepts.
+#: Intervals the runtime cannot express (``45`` minutes, ``2D``) fall back to
+#: the configured default rather than being silently misscaled.
+#: Minute counts are matched case-insensitively, but the unit-suffixed tokens
+#: are case-sensitive upstream: ``1M`` is a month while ``1m`` would be a
+#: minute, so the capitalised tokens are listed verbatim and never lowercased.
+_INTERVAL_FREQUENCIES = {
+    "1": "1m",
+    "3": "3m",
+    "5": "5m",
+    "15": "15m",
+    "30": "30m",
+    "60": "1h",
+    "120": "4h",
+    "180": "4h",
+    "240": "4h",
+    "360": "4h",
+    "1h": "1h",
+    "2h": "1h",
+    "3h": "4h",
+    "4h": "4h",
+    "6h": "4h",
+    "D": "1d",
+    "1D": "1d",
+    "2D": "1d",
+    "3D": "1d",
+    "W": "1w",
+    "1W": "1w",
+    # Monthly is outside the runtime's subscription grid, so it is absent here
+    # and falls back to the configured default.
+}
 # Only "strong" candidates are worth a backtest slot.
 DEFAULT_MIN_SCORE = max(0, int(os.getenv("TRADINGVIEW_MIN_SCORE", "70")))
 # A run that never opens a position does not exercise the translated strategy,
@@ -433,7 +469,7 @@ def _candidate_rows(limit: int, *, min_score: int) -> List[Dict[str, Any]]:
             cur.execute(
                 """
                 SELECT s.id, s.script_id_part, s.name, s.author, s.source_code,
-                       s.migratability_score, s.likes_count
+                       s.chart_interval, s.migratability_score, s.likes_count
                   FROM qd_tv_scripts s
                   LEFT JOIN qd_tv_conversions c ON c.script_id_part = s.script_id_part
                  WHERE s.source_fetched_at IS NOT NULL
@@ -500,12 +536,15 @@ def convert_pending_scripts(
         source = str(row.get("source_code") or "")
         if not script_id_part or not source:
             continue
+        # Translate onto the timeframe upstream actually published, so the
+        # generated strategy is measured on the grid its author designed for.
+        frequency = _frequency_for_interval(row.get("chart_interval"))
         try:
             module = module or _assess_module()
             result = module.transpile_pine(
                 source,
                 symbol=_DEFAULT_INSTRUMENT,
-                timeframe=_DEFAULT_FREQUENCY,
+                timeframe=frequency,
                 name=str(row.get("name") or ""),
             )
         except Exception as exc:
@@ -666,6 +705,105 @@ _SUBSCRIBE_PATTERN = re.compile(r"""context\.subscribe\(\s*frequency\s*=\s*["'](
 #: Frequencies a strategy declares. Read from the generated source rather than
 #: from ``compile_strategy_v2`` because this runs inside a loop over candidates
 #: and a full compile per candidate is far more expensive than a regex.
+def _interval_minutes(raw: str) -> int:
+    """Read a TradingView interval token as a duration in minutes, or 0.
+
+    Handles the shapes the feed actually uses: a bare minute count (``240``),
+    and a count with a unit (``60m``, ``4h``, ``1D``, ``1W``). A capital ``M``
+    is a month upstream and is rejected here, since months are outside the
+    runtime's subscription grid.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return 0
+    if text.isdigit():
+        return int(text)
+    match = re.fullmatch(r"(\d+)\s*([mhdwMDW])", text)
+    if not match:
+        return 0
+    amount, unit = int(match.group(1)), match.group(2)
+    if unit == "M":
+        return 0  # monthly: not a subscription frequency
+    per_unit = {"m": 1, "h": 60, "d": 1440, "w": 10080}[unit.lower()]
+    return amount * per_unit if amount > 0 else 0
+
+
+def _nearest_grid_frequency(minutes: int) -> str:
+    """Snap a duration onto the closest subscribed frequency.
+
+    Ties go to the shorter bar: a strategy written for an in-between duration
+    keeps more of its entry granularity on the smaller grid, and the engine
+    replays bar by bar, so the shorter bar is the more faithful approximation.
+    """
+    from app.services.strategy_v2.frequencies import (
+        FREQUENCY_SECONDS,
+        SUPPORTED_SUBSCRIPTION_FREQUENCIES,
+    )
+
+    if minutes <= 0:
+        return _DEFAULT_FREQUENCY
+    best = min(
+        SUPPORTED_SUBSCRIPTION_FREQUENCIES,
+        key=lambda item: (abs(FREQUENCY_SECONDS[item] / 60.0 - minutes), FREQUENCY_SECONDS[item]),
+    )
+    return best
+
+
+def _driving_frequency(code: str) -> Tuple[str, List[str]]:
+    """Return the frequency the generated strategy actually runs on, plus extras.
+
+    The generated module declares its own subscriptions, and the engine replays
+    on the shortest one. Deriving the window from the code instead of from the
+    configured default keeps the two in step: a strategy converted onto 15m bars
+    must be measured over a 15m window, not an hourly one.
+    ``context.subscribe`` order is not meaningful here, so the shortest declared
+    frequency wins, matching ``driving_frequency`` in the engine.
+    """
+    from app.services.strategy_v2.frequencies import frequency_seconds
+
+    declared = _declared_frequencies(code)
+    if not declared:
+        return _DEFAULT_FREQUENCY, []
+    ordered = sorted(declared, key=frequency_seconds)
+    return ordered[0], ordered[1:]
+
+
+def _frequency_for_interval(chart_interval: str) -> str:
+    """Resolve the timeframe a harvested strategy was published for.
+
+    TradingView reports the interval the author used, which is the only upstream
+    evidence about the timeframe the strategy was designed for. Preferring it
+    over the configured default matters: judging a 15-minute scalper on hourly
+    bars measures a different strategy.
+
+    Intervals the runtime cannot subscribe to (45 minutes, 2 days, 9 minutes)
+    legitimately fall back to the default, because ``context.subscribe`` only
+    accepts the fixed grid. The fallback is deliberately silent here and visible
+    in ``diagnostics`` at conversion time instead.
+    """
+    raw = str(chart_interval or "").strip()
+    if not raw:
+        return _DEFAULT_FREQUENCY
+    # Capitalised unit tokens are matched before any case folding: ``1M`` means
+    # one month upstream, and lowercasing it first would read as one minute.
+    if raw.upper() == "M" or raw.upper() == "1M":
+        return _DEFAULT_FREQUENCY
+    mapped = _INTERVAL_FREQUENCIES.get(raw) or _INTERVAL_FREQUENCIES.get(raw.upper())
+    if mapped:
+        return mapped
+    mapped = _INTERVAL_FREQUENCIES.get(raw.lower())
+    if mapped:
+        return mapped
+    # Anything else that still expresses a duration is snapped to the nearest
+    # grid point instead of the default: an 8-hour strategy measured on 4-hour
+    # bars is off by 2x, while measuring it on the 1h default would be off by
+    # 8x. Tokens with no duration at all (``nonsense``) still fall back.
+    minutes = _interval_minutes(raw)
+    if minutes:
+        return _nearest_grid_frequency(minutes)
+    return _DEFAULT_FREQUENCY
+
+
 def _declared_frequencies(code: str) -> List[str]:
     return [item for item in dict.fromkeys(_SUBSCRIBE_PATTERN.findall(code or "")) if item]
 
@@ -790,6 +928,7 @@ def backtest_and_publish(
         source_id = int(row["source_id"])
         code = str(row.get("code") or "")
         name = str(row.get("name") or "TradingView strategy")
+        primary_frequency, extra_frequencies = _driving_frequency(code)
         if publish and str(row.get("status") or "") == "backtested" and row.get("backtest_run_id"):
             # Already has a successful run: reuse it so a publish pass is cheap
             # and idempotent instead of re-backtesting every time.
@@ -800,9 +939,9 @@ def backtest_and_publish(
             # Resolved per strategy: a converted script may subscribe to several
             # timeframes, and each carries its own window cap.
             start, end = _backtest_range(
-                _DEFAULT_FREQUENCY,
+                primary_frequency,
                 warmup_bars=_WARMUP_BARS,
-                extra_frequencies=_declared_frequencies(code),
+                extra_frequencies=extra_frequencies,
             )
             try:
                 with timeout_context(BACKTEST_TIMEOUT_SEC):
@@ -841,6 +980,7 @@ def backtest_and_publish(
         summary = {
             "source_id": source_id,
             "script_id_part": row["script_id_part"],
+            "frequency": primary_frequency,
             "run_id": run_id,
             "range": (
                 {"start": start.isoformat(), "end": end.isoformat()}
