@@ -893,3 +893,120 @@ def test_a_strategy_that_exceeds_the_time_ceiling_is_parked_as_timeout(monkeypat
     parked = [item for item in cursor.executed if item[1] and item[1][0] == "timeout"]
     assert parked, "a timed out strategy must be parked under its own status"
     assert parked[0][1][-1] == "PUB;slow"
+
+
+def _threshold_harness(monkeypatch, metrics):
+    """Run one publish pass over a stored backtest and return what happened."""
+    candidate = {
+        "script_id_part": "PUB;weak",
+        "source_id": 11,
+        "status": "backtested",
+        "backtest_run_id": 77,
+        "name": "weak",
+        "description": "",
+        "code": "def initialize(context):\n    pass\n",
+    }
+
+    def handler(query: str, params):
+        if "FROM qd_tv_conversions c" in query:
+            return [candidate]
+        return []
+
+    cursor = _install_db(monkeypatch, handler)
+    monkeypatch.setattr(
+        pipeline_module, "_stored_run_result", lambda run_id: dict(metrics)
+    )
+    monkeypatch.setattr(
+        "app.services.strategy_v2.strategy_source_code_hash", lambda code: "h"
+    )
+    published: List[dict] = []
+
+    class _Community:
+        def publish_script_template_from_strategy(self, **kwargs):
+            published.append(kwargs)
+            return True, "success", {"indicator_id": 3}
+
+    monkeypatch.setattr(
+        "app.services.community_service.get_community_service", lambda: _Community()
+    )
+    result = pipeline_module.backtest_and_publish(
+        limit=1, user_id=1, min_score=0, publish=True
+    )
+    return cursor, published, result
+
+
+def test_a_losing_backtest_is_not_published(monkeypatch):
+    """A measured loss is information, not a listing.
+
+    The marketplace has no editorial layer, so publishing is the endorsement.
+    """
+    cursor, published, result = _threshold_harness(
+        monkeypatch,
+        {"totalTrades": 40, "totalReturn": -12.5, "sharpeRatio": 0.4, "maxDrawdown": -20.0},
+    )
+
+    assert published == []
+    assert result["published"] == 0
+    assert result["skipped"] == 1
+    parked = [item for item in cursor.executed if item[1] and item[1][0] == "below_threshold"]
+    assert parked, "a rejected strategy must be parked under below_threshold"
+    assert parked[0][1][-1] == "PUB;weak"
+
+
+def test_a_backtest_that_did_not_beat_noise_is_not_published(monkeypatch):
+    """A positive return with a negative Sharpe is still unproven risk-taking."""
+    _, published, result = _threshold_harness(
+        monkeypatch,
+        {"totalTrades": 90, "totalReturn": 2.0, "sharpeRatio": -0.3, "maxDrawdown": -15.0},
+    )
+
+    assert published == []
+    assert result["published"] == 0
+    assert result["results"][0]["verdict"]["failed"] == ["sharpe"]
+
+
+def test_an_explosive_drawdown_is_not_published(monkeypatch):
+    """A profitable run that lost most of its peak equity is not a listing."""
+    _, published, result = _threshold_harness(
+        monkeypatch,
+        {"totalTrades": 120, "totalReturn": 30.0, "sharpeRatio": 1.2, "maxDrawdown": -85.0},
+    )
+
+    assert published == []
+    assert result["results"][0]["verdict"]["failed"] == ["drawdown"]
+
+
+def test_a_defensible_backtest_is_still_published(monkeypatch):
+    """The thresholds must not block the strategies they are meant to admit."""
+    _, published, result = _threshold_harness(
+        monkeypatch,
+        {"totalTrades": 36, "totalReturn": 16.27, "sharpeRatio": 1.04, "maxDrawdown": -14.32},
+    )
+
+    assert result["published"] == 1
+    assert len(published) == 1
+    assert result["results"][0]["verdict"]["rejected"] is False
+
+
+def test_the_verdict_records_why_a_strategy_was_rejected(monkeypatch):
+    """The decision has to be auditable from the row, not from a log line."""
+    _, _, result = _threshold_harness(
+        monkeypatch,
+        {"totalTrades": 10, "totalReturn": -5.0, "sharpeRatio": -1.0, "maxDrawdown": -80.0},
+    )
+
+    verdict = result["results"][0]["verdict"]
+    assert verdict["rejected"] is True
+    assert sorted(verdict["failed"]) == ["drawdown", "return", "sharpe"]
+    assert verdict["metrics"]["totalReturn"] == -5.0
+    assert verdict["thresholds"]["maxDrawdownPct"] > 0
+
+
+def test_a_missing_metric_does_not_silently_reject(monkeypatch):
+    """An absent number is unknown, not failing; the trades floor still applies."""
+    _, published, result = _threshold_harness(
+        monkeypatch, {"totalTrades": 20, "totalReturn": None, "sharpeRatio": None}
+    )
+
+    assert result["published"] == 1
+    assert len(published) == 1

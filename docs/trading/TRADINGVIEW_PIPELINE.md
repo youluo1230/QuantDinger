@@ -103,6 +103,20 @@ See `.env.example` for the full variable list. The important ones:
   `backtest_failed` so one broken script cannot consume a slot on every batch.
   Both states keep the row out of later batches; set it back to `ready` to retry
   after fixing the transpiler.
+- **A finished backtest is not an endorsement.** Publishing is the marketplace's
+  only quality signal — there is no editorial layer behind it — so the publish
+  step applies floors to the measured result: `TRADINGVIEW_MIN_RETURN_PCT`
+  (default `0`), `TRADINGVIEW_MIN_SHARPE` (default `0`) and
+  `TRADINGVIEW_MAX_DRAWDOWN_PCT` (default `60`, on the magnitude of the
+  engine's negative `maxDrawdown`). A strategy that misses any of them is
+  parked as `below_threshold` with `diagnostics.metrics` and
+  `diagnostics.failed` recorded, which keeps the decision auditable and lets a
+  later threshold change be re-evaluated from stored numbers instead of a fresh
+  backtest. These are floors, not quality: they reject "lost money" and "blew
+  up", and say nothing about how good the survivors are. Raising them is the
+  intended way to tighten the market; lowering them re-admits rejects on the
+  next publish pass, since `below_threshold` rows stay out of the queue until
+  their status is reset to `ready`.
 - **Licensing.** TradingView code is readable by anyone but not freely
   redistributable. Generated strategies are derived works; keep the original
   script URL (stored in `chart_url`) with the listing so attribution is

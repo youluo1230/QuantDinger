@@ -56,6 +56,15 @@ DEFAULT_MIN_SCORE = max(0, int(os.getenv("TRADINGVIEW_MIN_SCORE", "70")))
 # so it is not evidence the conversion works. Anything below this bar is parked
 # as ``no_trades`` instead of being published.
 MIN_PUBLISH_TRADES = max(1, int(os.getenv("TRADINGVIEW_MIN_TRADES", "3")))
+# Publishing is the marketplace's only quality signal, so a strategy has to be
+# defensible on its own backtest before it ships. These are floors, not
+# promises: they reject "lost money", "barely better than noise" and "blew up",
+# and say nothing about how good the survivors are. A strategy that fails them is
+# parked as ``below_threshold`` with the numbers recorded, so the threshold can
+# be revisited without re-running the backtest.
+MIN_PUBLISH_RETURN_PCT = float(os.getenv("TRADINGVIEW_MIN_RETURN_PCT", "0"))
+MIN_PUBLISH_SHARPE = float(os.getenv("TRADINGVIEW_MIN_SHARPE", "0"))
+MAX_PUBLISH_DRAWDOWN_PCT = float(os.getenv("TRADINGVIEW_MAX_DRAWDOWN_PCT", "60"))
 # A converted strategy whose generated code scans the whole history per bar can
 # take minutes on a one-year window. One such script must not consume the whole
 # batch, so each backtest gets a hard ceiling and is parked as ``timeout`` when
@@ -313,6 +322,46 @@ def _stored_run_result(run_id: int) -> Dict[str, Any]:
         "totalReturn": row.get("total_return"),
         "sharpeRatio": row.get("sharpe_ratio"),
         "maxDrawdown": row.get("max_drawdown"),
+    }
+
+
+def _publish_verdict(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Decide whether a finished backtest clears the publish thresholds.
+
+    The marketplace has no editorial layer, so publishing *is* the endorsement.
+    These checks are deliberately floors rather than a score: they answer "is
+    this defensible at all", not "is this good". Every number is returned so the
+    decision can be audited from the conversion row without re-running anything.
+    """
+    metrics: Dict[str, Any] = {}
+    for key in ("totalReturn", "sharpeRatio", "maxDrawdown"):
+        raw = result.get(key)
+        try:
+            metrics[key] = None if raw is None else float(raw)
+        except (TypeError, ValueError):
+            metrics[key] = None
+
+    failed: List[str] = []
+    total_return = metrics.get("totalReturn")
+    if total_return is not None and total_return < MIN_PUBLISH_RETURN_PCT:
+        failed.append("return")
+    sharpe = metrics.get("sharpeRatio")
+    if sharpe is not None and sharpe < MIN_PUBLISH_SHARPE:
+        failed.append("sharpe")
+    drawdown = metrics.get("maxDrawdown")
+    # ``maxDrawdown`` is negative (or zero) in the engine's output.
+    if drawdown is not None and abs(drawdown) > MAX_PUBLISH_DRAWDOWN_PCT:
+        failed.append("drawdown")
+
+    return {
+        "rejected": bool(failed),
+        "failed": failed,
+        "metrics": metrics,
+        "thresholds": {
+            "minReturnPct": MIN_PUBLISH_RETURN_PCT,
+            "minSharpe": MIN_PUBLISH_SHARPE,
+            "maxDrawdownPct": MAX_PUBLISH_DRAWDOWN_PCT,
+        },
     }
 
 
@@ -820,6 +869,25 @@ def backtest_and_publish(
             )
             continue
 
+        # A backtest that finished is not automatically a strategy worth
+        # shipping, so the thresholds gate the *publish* step. A backtest-only
+        # pass still records ``backtested``: rejecting it there would conflate
+        # "we measured it" with "we decided not to ship it", and the publish
+        # pass re-applies the same gate to the stored numbers later.
+        verdict = _publish_verdict(result)
+        summary["verdict"] = verdict
+        if publish and verdict["rejected"]:
+            summary["skipped"] = "below_threshold"
+            results.append(summary)
+            _set_conversion_status(
+                row["script_id_part"],
+                status="below_threshold",
+                backtest_run_id=run_id,
+                code_hash=strategy_source_code_hash(code),
+                diagnostics={"metrics": verdict["metrics"], "failed": verdict["failed"]},
+            )
+            continue
+
         if publish:
             try:
                 ok, message, payload = community.publish_script_template_from_strategy(
@@ -926,7 +994,10 @@ def pipeline_status() -> Dict[str, Any]:
 __all__ = [
     "BACKTEST_TIMEOUT_SEC",
     "DEFAULT_MIN_SCORE",
+    "MAX_PUBLISH_DRAWDOWN_PCT",
     "MIGRATABILITY_VERSION",
+    "MIN_PUBLISH_RETURN_PCT",
+    "MIN_PUBLISH_SHARPE",
     "MIN_PUBLISH_TRADES",
     "TRANSPILER_VERSION",
     "assess_pending_scripts",
