@@ -46,10 +46,10 @@ MIGRATABILITY_VERSION = max(1, int(os.getenv("TRADINGVIEW_ASSESS_VERSION", "1"))
 # Keeping it separate from MIGRATABILITY_VERSION matters: scoring tweaks must not
 # rewrite every generated strategy, and transpiler fixes must not silently
 # backtest yesterday's output.
-# Version 5 translates onto the interval TradingView published instead of the
-# configured default, so every earlier row was generated on the wrong grid and
-# has to be regenerated rather than reused.
-TRANSPILER_VERSION = max(1, int(os.getenv("TRADINGVIEW_TRANSPILER_VERSION", "5")))
+# Version 6 translates onto the instrument TradingView published as well as the
+# interval, so earlier rows embed the wrong symbol and must be regenerated.
+# Version 5 was the interval change; both invalidate previously generated code.
+TRANSPILER_VERSION = max(1, int(os.getenv("TRADINGVIEW_TRANSPILER_VERSION", "6")))
 
 _DEFAULT_INSTRUMENT = os.getenv("TRADINGVIEW_DEFAULT_INSTRUMENT", "BTC/USDT")
 _DEFAULT_FREQUENCY = os.getenv("TRADINGVIEW_DEFAULT_FREQUENCY", "1h")
@@ -61,6 +61,102 @@ _DEFAULT_FREQUENCY = os.getenv("TRADINGVIEW_DEFAULT_FREQUENCY", "1h")
 #: Minute counts are matched case-insensitively, but the unit-suffixed tokens
 #: are case-sensitive upstream: ``1M`` is a month while ``1m`` would be a
 #: minute, so the capitalised tokens are listed verbatim and never lowercased.
+#: TradingView exchange prefixes grouped by the market this runtime can load
+#: data for. Upstream names a broker or venue; the runtime only knows markets,
+#: and the symbol body still has to be reshaped per market (crypto needs a
+#: ``BASE/QUOTE`` pair). Prefixes outside this table have no data source here.
+_EXCHANGE_MARKETS = {
+    # Spot and perpetual crypto venues.
+    "BINANCE": "Crypto",
+    "BINANCEUS": "Crypto",
+    "BYBIT": "Crypto",
+    "BITFINEX": "Crypto",
+    "BITSTAMP": "Crypto",
+    "BITMEX": "Crypto",
+    "BITGET": "Crypto",
+    "BITTREX": "Crypto",
+    "COINBASE": "Crypto",
+    "CRYPTO": "Crypto",
+    "FTX": "Crypto",
+    "GEMINI": "Crypto",
+    "HTX": "Crypto",
+    "KUCOIN": "Crypto",
+    "BNC": "Crypto",
+    "INDEX": "Crypto",
+    # Equities.
+    "NASDAQ": "USStock",
+    "NYSE": "USStock",
+    "AMEX": "USStock",
+    "SP": "USStock",
+    "DJ": "USStock",
+    "TVC": "USStock",
+    "NSE": "USStock",
+    # FX and metals CFD feeds.
+    "OANDA": "Forex",
+    "FX": "Forex",
+    "FOREXCOM": "Forex",
+    "PEPPERSTONE": "Forex",
+    "ALCHEMY": "Forex",
+    # Futures.
+    "CME_MINI": "Futures",
+    "CME": "Futures",
+    "CBOT": "Futures",
+    "COMEX": "Futures",
+    "NYMEX": "Futures",
+    "MCX": "Futures",
+}
+
+#: ``1!``/``.P``/``.R`` are vendor suffixes for continuous or perpetual
+#: contracts; the underlying symbol is what a data provider accepts.
+_SYMBOL_SUFFIXES = ("1!", ".P", ".R", ".D")
+
+#: Index tickers TradingView names one way and free data providers another.
+#: Only unambiguous mappings belong here.
+_INDEX_SYMBOLS = {
+    "SPX": "^GSPC",
+    "US500": "^GSPC",
+    "NDX": "^NDX",
+    "US100": "^NDX",
+    "IXIC": "^IXIC",
+    "DJI": "^DJI",
+    "US30": "^DJI",
+    "NIFTY": "^NSEI",
+    "BANKNIFTY": "^NSEBANK",
+}
+
+#: Crypto quote assets, longest first so ``USDT`` wins over ``USD``.
+_CRYPTO_QUOTES = (
+    "USDT", "USDC", "BUSD", "TUSD", "FDUSD", "USD", "BTC", "ETH", "BNB", "EUR", "TRY",
+)
+
+#: Fiat currencies that appear as both legs of an FX pair.
+_FX_CODES = (
+    "EUR", "USD", "JPY", "GBP", "AUD", "NZD", "CAD", "CHF", "CNH", "SEK", "NOK", "MXN",
+    "SGD", "HKD", "TRY", "ZAR", "PLN", "DKK", "CZK", "HUF", "INR", "RUB", "BRL",
+)
+
+#: Futures roots whose TradingView name differs from the provider's.
+_FUTURES_SYMBOLS = {
+    "NATGASMINI": "NG",
+    "NATGAS": "NG",
+    "CRUDEOILMINI": "CL",
+    "CRUDEOIL": "CL",
+    "SILVERMINI": "SI",
+    "GOLDMINI": "GC",
+}
+
+#: Metals and energy CFD tickers that are not currency pairs.
+_CFD_SYMBOLS = {
+    "XAUUSD": "XAU/USD",
+    "XAGUSD": "XAG/USD",
+    "XPTUSD": "XPT/USD",
+    "XPDUSD": "XPD/USD",
+    "WTIUSD": "WTI/USD",
+    "BRENTUSD": "BRENT/USD",
+    "NATGASUSD": "NATGAS/USD",
+}
+
+
 _INTERVAL_FREQUENCIES = {
     "1": "1m",
     "3": "3m",
@@ -507,7 +603,8 @@ def _candidate_rows(limit: int, *, min_score: int) -> List[Dict[str, Any]]:
             cur.execute(
                 """
                 SELECT s.id, s.script_id_part, s.name, s.author, s.source_code,
-                       s.chart_interval, s.migratability_score, s.likes_count
+                       s.chart_interval, s.symbol_name, s.migratability_score,
+                       s.likes_count
                   FROM qd_tv_scripts s
                   LEFT JOIN qd_tv_conversions c ON c.script_id_part = s.script_id_part
                  WHERE s.source_fetched_at IS NOT NULL
@@ -541,6 +638,19 @@ def _source_description(row: Dict[str, Any], assessment: Dict[str, Any]) -> str:
         f"Original author: {row.get('author') or 'unknown'}.",
         f"Migratability score: {int(assessment.get('score') or 0)}/100.",
     ]
+    # Record what the strategy was actually measured on, so a listing cannot be
+    # mistaken for the instrument it was written for when the venue has no data
+    # source here and the configured default was substituted.
+    upstream = str(row.get("symbol_name") or "").strip()
+    market, instrument = _instrument_for_symbol(upstream)
+    if upstream:
+        if market and instrument:
+            parts.append(f"Published on {upstream}, evaluated on {market}:{instrument}.")
+        else:
+            parts.append(
+                f"Published on {upstream}, evaluated on {_DEFAULT_INSTRUMENT} "
+                f"because that venue has no data source here."
+            )
     warnings = assessment.get("stats", {}).get("unsupported_calls") or []
     if warnings:
         shown = ", ".join(str(item) for item in list(warnings)[:8])
@@ -574,14 +684,17 @@ def convert_pending_scripts(
         source = str(row.get("source_code") or "")
         if not script_id_part or not source:
             continue
-        # Translate onto the timeframe upstream actually published, so the
-        # generated strategy is measured on the grid its author designed for.
+        # Translate onto the timeframe and instrument upstream actually published.
+        # Measuring a 15-minute scalper on hourly bars, or an S&P strategy on
+        # Bitcoin, evaluates a strategy the author never wrote.
         frequency = _frequency_for_interval(row.get("chart_interval"))
+        market, instrument = _instrument_for_symbol(row.get("symbol_name"))
+        symbol = _resolved_instrument(market, instrument)
         try:
             module = module or _assess_module()
             result = module.transpile_pine(
                 source,
-                symbol=_DEFAULT_INSTRUMENT,
+                symbol=symbol,
                 timeframe=frequency,
                 name=str(row.get("name") or ""),
             )
@@ -806,6 +919,133 @@ def _driving_frequency(code: str) -> Tuple[str, List[str]]:
     return ordered[0], ordered[1:]
 
 
+def _crypto_pair(body: str) -> str:
+    """Reshape a venue ticker into the ``BASE/QUOTE`` pair the runtime loads.
+
+    ``BINANCE:BTCUSDT`` becomes ``BTC/USDT``; ``BTCUSDT.P`` has the perpetual
+    suffix stripped first. Concatenated tickers are ambiguous in principle, so
+    the quote asset is matched longest-first and a ticker with no recognisable
+    quote is left alone.
+    """
+    text = body.upper()
+    for suffix in _SYMBOL_SUFFIXES:
+        if text.endswith(suffix.upper()):
+            text = text[: -len(suffix)]
+            break
+    # Some venues publish the perpetual marker in the ticker itself.
+    if text.endswith("PERP") and len(text) > 4:
+        text = text[:-4]
+    if "/" in text:
+        return text
+    for quote in _CRYPTO_QUOTES:
+        if text.endswith(quote) and len(text) > len(quote):
+            return f"{text[: -len(quote)]}/{quote}"
+    return text
+
+
+def _fx_pair(body: str) -> str:
+    """Reshape a broker FX ticker into ``BASE/QUOTE``.
+
+    ``OANDA:EURUSD`` becomes ``EUR/USD``; metals such as ``XAUUSD`` map through
+    a small table because the runtime's forex provider names them explicitly.
+    """
+    text = body.upper()
+    for suffix in _SYMBOL_SUFFIXES:
+        if text.endswith(suffix.upper()):
+            text = text[: -len(suffix)]
+            break
+    if "/" in text:
+        return text
+    if text in _CFD_SYMBOLS:
+        return _CFD_SYMBOLS[text]
+    for base in _FX_CODES:
+        if text.startswith(base) and len(text) > len(base):
+            return f"{base}/{text[len(base):]}"
+    return text
+
+
+def _instrument_for_symbol(symbol_name: str) -> Tuple[str, str]:
+    """Map an upstream symbol into ``(market, symbol)`` the runtime can load.
+
+    TradingView names the broker or venue a script was written against
+    (``BINANCE:BTCUSDT``, ``NASDAQ:AAPL``, ``OANDA:XAUUSD``) while the backtest
+    engine only knows markets. Testing every strategy on one fixed instrument
+    measured a different strategy than the author wrote: an S&P strategy was
+    judged on Bitcoin. This resolves each script onto its own market and ticker.
+
+    Returns ``("", "")`` when the venue has no data source here, so the caller
+    can fall back rather than request data that will never arrive.
+    """
+    raw = str(symbol_name or "").strip()
+    if not raw:
+        return "", ""
+    prefix, _, body = raw.partition(":")
+    if not body:
+        prefix, body = "", raw
+    market = _EXCHANGE_MARKETS.get(prefix.upper())
+    if not market:
+        return "", ""
+    body = body.strip()
+    if not body:
+        return "", ""
+
+    if market == "Crypto":
+        # An index ticker (``INDEX:BTCUSD``) is a spot pair quoted in fiat.
+        return market, _crypto_pair(body)
+    if market == "Forex":
+        return market, _fx_pair(body)
+    if market in {"USStock", "HKStock"}:
+        text = body.upper()
+        for suffix in _SYMBOL_SUFFIXES:
+            if text.endswith(suffix.upper()):
+                text = text[: -len(suffix)]
+                break
+        # Exchange indices map onto the provider's index ticker; the rest are
+        # plain equity symbols. Indian single stocks are mapped but have no
+        # data source here, so they resolve and then report no data rather than
+        # being silently substituted with something else.
+        return market, _INDEX_SYMBOLS.get(text, text)
+    # Futures contracts reference a continuous series; the runtime resolves the
+    # root ticker. Vendor symbols and month codes carry no data here.
+    text = body.upper()
+    for suffix in _SYMBOL_SUFFIXES:
+        if text.endswith(suffix.upper()):
+            text = text[: -len(suffix)]
+            break
+    text = re.sub(r"[FGHJKMNQUVXZ]\d{1,2}$", "", text) or text
+    return market, _FUTURES_SYMBOLS.get(text, text)
+
+
+def _resolved_instrument(market: str, instrument: str) -> str:
+    """Return the symbol to embed in generated code.
+
+    The market prefix is kept so the engine cannot misinfer the market from the
+    ticker: ``EUR/USD`` alone infers as crypto, while ``Forex:EUR/USD`` does not.
+    Falls back to the configured instrument when upstream names a venue with no
+    data source here.
+    """
+    if market and instrument:
+        return f"{market}:{instrument}"
+    return _DEFAULT_INSTRUMENT
+
+
+def _code_instrument(code: str) -> Tuple[str, str]:
+    """Read the market and symbol a generated strategy was translated onto.
+
+    The window limits are per market (a US equity intraday request carries a
+    much narrower cap than crypto), so validating against the wrong market
+    accepts windows the engine then rejects.
+    """
+    match = re.search(r'^_SYMBOL\s*=\s*"([^"]*)"', str(code or ""), re.MULTILINE)
+    raw = match.group(1) if match else ""
+    if not raw:
+        return "", ""
+    market, _, instrument = raw.partition(":")
+    if not instrument:
+        return "", raw
+    return market, instrument
+
+
 def _frequency_for_interval(chart_interval: str) -> str:
     """Resolve the timeframe a harvested strategy was published for.
 
@@ -851,6 +1091,8 @@ def _backtest_range(
     *,
     warmup_bars: int = 0,
     extra_frequencies: Sequence[str] = (),
+    market: str = "Crypto",
+    symbol: str = "",
 ) -> tuple[datetime, datetime]:
     """Return a legal backtest window for the configured frequency.
 
@@ -894,8 +1136,8 @@ def _backtest_range(
         fetch_start = start - timedelta(days=warmup_days)
         errors = [
             validate_backtest_range(
-                market="Crypto",
-                symbol=_DEFAULT_INSTRUMENT,
+                market=market,
+                symbol=symbol or _DEFAULT_INSTRUMENT,
                 timeframe=timeframe,
                 start_date=start,
                 end_date=end,
@@ -967,6 +1209,7 @@ def backtest_and_publish(
         code = str(row.get("code") or "")
         name = str(row.get("name") or "TradingView strategy")
         primary_frequency, extra_frequencies = _driving_frequency(code)
+        code_market, code_symbol = _code_instrument(code)
         if publish and str(row.get("status") or "") == "backtested" and row.get("backtest_run_id"):
             # Already has a successful run: reuse it so a publish pass is cheap
             # and idempotent instead of re-backtesting every time.
@@ -975,11 +1218,14 @@ def backtest_and_publish(
             start, end = None, None
         else:
             # Resolved per strategy: a converted script may subscribe to several
-            # timeframes, and each carries its own window cap.
+            # timeframes, and each carries its own window cap. The market matters
+            # too: a US equity intraday cap is a fraction of the crypto one.
             start, end = _backtest_range(
                 primary_frequency,
                 warmup_bars=_WARMUP_BARS,
                 extra_frequencies=extra_frequencies,
+                market=code_market or "Crypto",
+                symbol=code_symbol,
             )
             try:
                 with timeout_context(BACKTEST_TIMEOUT_SEC):
@@ -1019,6 +1265,8 @@ def backtest_and_publish(
             "source_id": source_id,
             "script_id_part": row["script_id_part"],
             "frequency": primary_frequency,
+            "market": code_market,
+            "symbol": code_symbol,
             "run_id": run_id,
             "range": (
                 {"start": start.isoformat(), "end": end.isoformat()}

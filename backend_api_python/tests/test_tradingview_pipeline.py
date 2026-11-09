@@ -1175,3 +1175,103 @@ def test_delisting_only_touches_script_templates():
     source = inspect.getsource(module._delist_rejected_templates)
     assert "asset_type = 'script_template'" in source
     assert "source_script_source_id = ?" in source
+
+
+@pytest.mark.parametrize(
+    "upstream,expected",
+    [
+        # Crypto venues, including perpetual/continuous vendor suffixes.
+        ("BINANCE:BTCUSDT", ("Crypto", "BTC/USDT")),
+        ("BINANCE:BTCUSDT.P", ("Crypto", "BTC/USDT")),
+        ("BITFINEX:BTCUSD", ("Crypto", "BTC/USD")),
+        ("BINANCE:XRPBTC", ("Crypto", "XRP/BTC")),
+        ("BITMEX:BTCUSD.P", ("Crypto", "BTC/USD")),
+        ("INDEX:BTCUSD", ("Crypto", "BTC/USD")),
+        # Equities and the indices that hide behind a vendor name.
+        ("NASDAQ:AAPL", ("USStock", "AAPL")),
+        ("AMEX:SPY", ("USStock", "SPY")),
+        ("SP:SPX", ("USStock", "^GSPC")),
+        ("TVC:US500", ("USStock", "^GSPC")),
+        ("DJ:DJI", ("USStock", "^DJI")),
+        ("NSE:NIFTY", ("USStock", "^NSEI")),
+        # FX and the metals CFD feeds that use the same symbol shape.
+        ("OANDA:EURUSD", ("Forex", "EUR/USD")),
+        ("FX:EURUSD", ("Forex", "EUR/USD")),
+        ("OANDA:XAUUSD", ("Forex", "XAU/USD")),
+        ("ALCHEMY:EURUSD.R", ("Forex", "EUR/USD")),
+        # Continuous futures roots.
+        ("CME_MINI:ES1!", ("Futures", "ES")),
+        ("CBOT:ZC1!", ("Futures", "ZC")),
+        ("MCX:NATGASMINI1!", ("Futures", "NG")),
+    ],
+)
+def test_upstream_symbols_resolve_onto_a_real_market(upstream, expected):
+    """Testing every strategy on one instrument measures the wrong strategy."""
+    assert pipeline_module._instrument_for_symbol(upstream) == expected
+
+
+@pytest.mark.parametrize("upstream", ["", "garbage", "ASX:FMG", None])
+def test_venues_without_a_data_source_do_not_resolve(upstream):
+    """An unresolvable venue must report nothing so the caller can fall back."""
+    assert pipeline_module._instrument_for_symbol(upstream) == ("", "")
+
+
+def test_the_generated_code_carries_the_market_that_was_resolved():
+    """The market prefix stops the engine inferring ``EUR/USD`` as crypto."""
+    assert pipeline_module._resolved_instrument("Forex", "EUR/USD") == "Forex:EUR/USD"
+    assert pipeline_module._resolved_instrument("USStock", "AAPL") == "USStock:AAPL"
+    # An unknown venue falls back rather than embedding a bogus market.
+    assert pipeline_module._resolved_instrument("", "") == pipeline_module._DEFAULT_INSTRUMENT
+
+
+def test_the_window_is_validated_against_the_strategys_own_market():
+    """US equities cap intraday history far below crypto, so the market matters."""
+    from app.services.backtest_limits import validate_backtest_range
+
+    market, symbol = pipeline_module._code_instrument('_SYMBOL = "USStock:AAPL"\n')
+    assert (market, symbol) == ("USStock", "AAPL")
+
+    start, end = pipeline_module._backtest_range("1h", market=market, symbol=symbol)
+    assert (
+        validate_backtest_range(
+            market=market,
+            symbol=symbol,
+            timeframe="1h",
+            start_date=start,
+            end_date=end,
+        )
+        is None
+    )
+
+
+def test_a_strategy_is_translated_onto_the_instrument_it_was_published_for(monkeypatch):
+    """A NASDAQ strategy must not be evaluated on Bitcoin."""
+    captured = {}
+
+    class _Transpiler:
+        @staticmethod
+        def transpile_pine(source, **kwargs):
+            captured.update(kwargs)
+            return _Result(ok=False, error="stop here")
+
+    monkeypatch.setattr(pipeline_module, "_assess_module", lambda: _Transpiler())
+    _install_db(
+        monkeypatch,
+        _candidate_handler(
+            [
+                {
+                    "id": 1,
+                    "script_id_part": "PUB;spx",
+                    "name": "spx",
+                    "author": "a",
+                    "source_code": "src",
+                    "chart_interval": "1D",
+                    "symbol_name": "SP:SPX",
+                }
+            ]
+        ),
+    )
+
+    pipeline_module.convert_pending_scripts(limit=1, user_id=1, min_score=0)
+
+    assert captured["symbol"] == "USStock:^GSPC"

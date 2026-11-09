@@ -75,10 +75,10 @@ See `.env.example` for the full variable list. The important ones:
 | `TRADINGVIEW_HARVEST_MAX_SOURCES` | `60` | Source fetches per run. |
 | `TRADINGVIEW_MIN_SCORE` | `70` | Candidates below this are staged but never converted. |
 | `TRADINGVIEW_MIN_TRADES` | `3` | Minimum trades before a strategy may be listed. |
-| `TRADINGVIEW_TRANSPILER_VERSION` | `5` | Bump to regenerate sources after transpiler changes. Version 5 translates onto the interval upstream published, so everything generated earlier sits on the wrong frequency grid. |
+| `TRADINGVIEW_TRANSPILER_VERSION` | `6` | Bump to regenerate sources after transpiler changes. Versions 5 and 6 translate onto the interval and instrument upstream published, so everything generated earlier carries the wrong grid and ticker. |
 | `TRADINGVIEW_BACKTEST_TIMEOUT_SEC` | `300` | Per-strategy backtest ceiling; slow scripts become `timeout`. |
 | `TRADINGVIEW_BACKTEST_DAYS` | `180` | Backtest lookback. Cost grows with the square of the window, so a longer window is rarely worth the queue time. |
-| `TRADINGVIEW_DEFAULT_INSTRUMENT` | `BTC/USDT` | Instrument used for verification backtests. |
+| `TRADINGVIEW_DEFAULT_INSTRUMENT` | `BTC/USDT` | Fallback only. Strategies are evaluated on the instrument TradingView published them for; this applies when that venue has no data source here (for example an ASX listing). |
 | `TRADINGVIEW_DEFAULT_FREQUENCY` | `1h` | Fallback only. Strategies are translated onto the interval TradingView published them on; this applies when upstream publishes no usable interval. |
 | `TRADINGVIEW_CONVERT_USER_ID` | `1` | Owner of the generated strategy sources. |
 
@@ -130,6 +130,15 @@ See `.env.example` for the full variable list. The important ones:
   backtest window does too: a 1m strategy can only be measured over weeks while
   a 1h strategy gets months, so **returns across listings are not directly
   comparable** and the marketplace score inherits that caveat.
+- **The instrument comes from upstream too.** TradingView names the venue a
+  script was written against (`BINANCE:BTCUSDT`, `NASDAQ:AAPL`, `OANDA:XAUUSD`).
+  Conversion resolves that onto a market this runtime can load and embeds
+  `Market:SYMBOL` in the generated code, because symbols are ambiguous across
+  markets — `EUR/USD` alone infers as crypto. Index names map to the provider's
+  ticker (`SP:SPX` becomes `USStock:^GSPC`). Venues with no data source here
+  (ASX, most NSE single stocks) fall back to `TRADINGVIEW_DEFAULT_INSTRUMENT`
+  and say so in the generated strategy's description, so a listing can be traced
+  back to what it was actually measured on.
 - **Licensing.** TradingView code is readable by anyone but not freely
   redistributable. Generated strategies are derived works; keep the original
   script URL (stored in `chart_url`) with the listing so attribution is
