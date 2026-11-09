@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import inspect
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, List
 
@@ -1275,3 +1275,110 @@ def test_a_strategy_is_translated_onto_the_instrument_it_was_published_for(monke
     pipeline_module.convert_pending_scripts(limit=1, user_id=1, min_score=0)
 
     assert captured["symbol"] == "USStock:^GSPC"
+
+
+class _FakeService:
+    """Minimal stand-in for the backtest service."""
+
+    def __init__(self, run):
+        self.run = run
+
+
+class _WindowTooWide(Exception):
+    """Stands in for the engine's ``marketData.no_market_data`` refusal."""
+
+
+def test_a_window_the_data_cannot_reach_is_retried_narrower(monkeypatch):
+    """Providers keep less history than backtest_limits permits.
+
+    The engine raises instead of clipping, so a strategy that would backtest fine
+    over a month was parked as broken when the year-long window came back empty.
+    """
+    attempts = []
+
+    def _run(**kwargs):
+        attempts.append(kwargs["start_date"])
+        if len(attempts) == 1:
+            raise _WindowTooWide("marketData.no_market_data")
+        return 4242, {"totalTrades": 11, "totalReturn": 3.0}
+
+    end = datetime(2026, 11, 9)
+    run_id, result, start, _ = pipeline_module._run_with_retries(
+        _FakeService(_run),
+        code="x",
+        start=end - timedelta(days=180),
+        end=end,
+        user_id=1,
+        source_id=3,
+        name="n",
+        initial_capital=10000.0,
+        market="Crypto",
+        symbol="BTC/USDT",
+        frequency="1h",
+        extra_frequencies=[],
+    )
+
+    assert run_id == 4242
+    assert result["totalTrades"] == 11
+    assert len(attempts) == 2, "the wider window must be retried narrower"
+    assert (end - start).days < 180, "the retry must use a shorter window"
+
+
+def test_a_broken_strategy_is_not_retried(monkeypatch):
+    """A NameError will raise again; retrying would waste a batch slot."""
+    attempts = []
+
+    def _run(**kwargs):
+        attempts.append(kwargs["start_date"])
+        raise NameError("name 'vwap' is not defined")
+
+    end = datetime(2026, 11, 9)
+
+    with pytest.raises(NameError):
+        pipeline_module._run_with_retries(
+            _FakeService(_run),
+            code="x",
+            start=end - timedelta(days=180),
+            end=end,
+            user_id=1,
+            source_id=3,
+            name="n",
+            initial_capital=10000.0,
+            market="Crypto",
+            symbol="BTC/USDT",
+            frequency="1h",
+            extra_frequencies=[],
+        )
+
+    assert len(attempts) == 1
+
+
+def test_every_retry_window_is_shortened_until_one_works(monkeypatch):
+    """The ladder must keep shrinking rather than giving up after one try."""
+    seen = []
+
+    def _run(**kwargs):
+        seen.append((kwargs["start_date"], kwargs["end_date"]))
+        if len(seen) < 4:
+            raise _WindowTooWide("strategyV2.insufficientWarmupData:X@1h=299/300")
+        return 7, {"totalTrades": 5, "totalReturn": 1.0}
+
+    end = datetime(2026, 11, 9)
+
+    pipeline_module._run_with_retries(
+        _FakeService(_run),
+        code="x",
+        start=end - timedelta(days=180),
+        end=end,
+        user_id=1,
+        source_id=3,
+        name="n",
+        initial_capital=10000.0,
+        market="Crypto",
+        symbol="BTC/USDT",
+        frequency="1h",
+        extra_frequencies=[],
+    )
+
+    spans = [(end_ - start_).days for start_, end_ in seen]
+    assert spans == sorted(spans, reverse=True), f"windows must shrink: {spans}"

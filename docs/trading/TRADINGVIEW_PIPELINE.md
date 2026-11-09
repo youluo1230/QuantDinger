@@ -139,6 +139,14 @@ See `.env.example` for the full variable list. The important ones:
   (ASX, most NSE single stocks) fall back to `TRADINGVIEW_DEFAULT_INSTRUMENT`
   and say so in the generated strategy's description, so a listing can be traced
   back to what it was actually measured on.
+- **Windows shrink when the data does not reach back.** `backtest_limits.py`
+  describes what each timeframe may *legally* request, but data providers keep
+  less than that, and the engine reports `marketData.no_market_data` or
+  `insufficientWarmupData` instead of clipping to the history it has. A
+  backtest therefore retries on progressively shorter windows (90, 60, 45, 30,
+  21, 14, 10, 7, 3 days) when — and only when — the failure is window-shaped.
+  Strategies that raise a `NameError` are not retried: they would raise it again
+  and only waste a batch slot.
 - **Licensing.** TradingView code is readable by anyone but not freely
   redistributable. Generated strategies are derived works; keep the original
   script URL (stored in `chart_url`) with the listing so attribution is

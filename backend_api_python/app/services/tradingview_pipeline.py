@@ -1086,6 +1086,123 @@ def _declared_frequencies(code: str) -> List[str]:
     return [item for item in dict.fromkeys(_SUBSCRIBE_PATTERN.findall(code or "")) if item]
 
 
+#: Errors that mean "the window is too wide for the data on hand" rather than
+#: "the strategy is broken". They are worth retrying on a shorter window:
+#: providers keep less history than ``backtest_limits`` permits, and the engine
+#: reports the shortfall instead of clipping to what it has.
+_WINDOW_TOO_WIDE_MARKERS = (
+    "no_market_data",
+    "noMarketData",
+    "insufficientWarmupData",
+    "backtestRangeLimit",
+)
+
+#: Windows to fall back to, in days, when the preferred one is unavailable.
+_RETRY_WINDOWS = (90, 60, 45, 30, 21, 14, 10, 7, 3)
+
+
+def _window_too_wide(exc: BaseException) -> bool:
+    """True when retrying on a shorter window could succeed."""
+    text = str(exc)
+    return any(marker in text for marker in _WINDOW_TOO_WIDE_MARKERS)
+
+
+def _backtest_once(
+    service: Any,
+    *,
+    code: str,
+    start: datetime,
+    end: datetime,
+    user_id: int,
+    source_id: int,
+    name: str,
+    initial_capital: float,
+) -> Tuple[int, Dict[str, Any]]:
+    """Run one backtest under the per-strategy ceiling.
+
+    The ceiling exists because one pathological strategy must not consume the
+    whole batch; it raises rather than returning a partial result so the caller
+    can tell a timeout from a strategy that simply did not trade.
+    """
+    with timeout_context(BACKTEST_TIMEOUT_SEC):
+        return service.run(
+            user_id=user_id,
+            code=code,
+            start_date=start,
+            end_date=end.replace(hour=23, minute=59, second=59),
+            initial_capital=float(initial_capital),
+            leverage_enabled=False,
+            leverage=1.0,
+            commission=0.001,
+            slippage=0.0,
+            params={},
+            strategy_id=None,
+            source_id=source_id,
+            strategy_name=name,
+        )
+
+
+def _run_with_retries(
+    service: Any,
+    *,
+    code: str,
+    start: datetime,
+    end: datetime,
+    user_id: int,
+    source_id: int,
+    name: str,
+    initial_capital: float,
+    market: str,
+    symbol: str,
+    frequency: str,
+    extra_frequencies: Sequence[str],
+) -> Tuple[int, Dict[str, Any], datetime, datetime]:
+    """Backtest, shrinking the window when the data does not reach back far enough.
+
+    ``backtest_limits`` describes what each timeframe may *legally* request, but
+    data providers keep less than that. The engine raises ``noMarketData`` or
+    ``insufficientWarmupData`` instead of clipping to the history it has, so a
+    strategy that would backtest fine over a month was parked as broken when the
+    year-long window came back empty. Retrying narrower distinguishes "this data
+    source does not go back that far" from "this strategy does not work".
+
+    Only window-shaped failures are retried: a strategy that raises
+    ``NameError`` will raise it again on a shorter window, and retrying would
+    waste a batch slot.
+    """
+    last: Optional[BaseException] = None
+    span_days = max(1, (end - start).days)
+    for days in (span_days, *(item for item in _RETRY_WINDOWS if item < span_days)):
+        attempt_end = end
+        attempt_start = attempt_end - timedelta(days=days)
+        try:
+            run_id, result = _backtest_once(
+                service,
+                code=code,
+                start=attempt_start,
+                end=attempt_end,
+                user_id=user_id,
+                source_id=source_id,
+                name=name,
+                initial_capital=initial_capital,
+            )
+            return run_id, result, attempt_start, attempt_end
+        except Exception as exc:  # noqa: BLE001 - re-raised below when not window-shaped
+            if not _window_too_wide(exc):
+                raise
+            last = exc
+            logger.info(
+                "Backtest window of %s days unavailable for source %s (%s); retrying shorter",
+                days,
+                source_id,
+                str(exc)[:160],
+            )
+    # Every window failed the same way; surface the narrowest attempt's error so
+    # the diagnostics say what the smallest request still could not satisfy.
+    assert last is not None
+    raise last
+
+
 def _backtest_range(
     frequency: str,
     *,
@@ -1228,22 +1345,20 @@ def backtest_and_publish(
                 symbol=code_symbol,
             )
             try:
-                with timeout_context(BACKTEST_TIMEOUT_SEC):
-                    run_id, result = service.run(
-                        user_id=user_id,
-                        code=code,
-                        start_date=start,
-                        end_date=end.replace(hour=23, minute=59, second=59),
-                        initial_capital=float(initial_capital),
-                        leverage_enabled=False,
-                        leverage=1.0,
-                        commission=0.001,
-                        slippage=0.0,
-                        params={},
-                        strategy_id=None,
-                        source_id=source_id,
-                        strategy_name=name,
-                    )
+                run_id, result, start, end = _run_with_retries(
+                    service,
+                    code=code,
+                    start=start,
+                    end=end,
+                    user_id=user_id,
+                    source_id=source_id,
+                    name=name,
+                    initial_capital=initial_capital,
+                    market=code_market or "Crypto",
+                    symbol=code_symbol,
+                    frequency=primary_frequency,
+                    extra_frequencies=extra_frequencies,
+                )
             except Exception as exc:
                 timed_out = isinstance(exc, (TimeoutError, SandboxTimeoutError))
                 logger.exception("Backtest failed for source %s", source_id)
