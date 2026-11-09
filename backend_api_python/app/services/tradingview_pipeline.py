@@ -401,6 +401,44 @@ def _publish_verdict(result: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _delist_rejected_templates(user_id: int, source_id: int, *, reason: str) -> int:
+    """Withdraw listings whose stored backtest no longer clears the thresholds.
+
+    The publish gate only runs on rows it is about to publish, so tightening a
+    threshold leaves earlier listings untouched: a strategy that lost money on
+    its own backtest keeps sitting in the marketplace. This closes that gap by
+    delisting anything already advertised for this source, and is a no-op when
+    nothing is listed.
+    """
+    if not source_id:
+        return 0
+    with get_db_connection() as db:
+        cur = db.cursor()
+        try:
+            cur.execute(
+                """
+                UPDATE qd_indicator_codes
+                   SET publish_to_community = 0,
+                       review_status = 'rejected',
+                       review_note = ?,
+                       reviewed_at = NOW(),
+                       reviewed_by = ?
+                 WHERE source_script_source_id = ?
+                   AND publish_to_community = 1
+                   AND asset_type = 'script_template'
+                """,
+                (reason[:500], int(user_id), int(source_id)),
+            )
+            removed = int(cur.rowcount or 0)
+            db.commit()
+            return removed
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            cur.close()
+
+
 def _set_conversion_status(
     script_id_part: str,
     *,
@@ -1018,6 +1056,15 @@ def backtest_and_publish(
         summary["verdict"] = verdict
         if publish and verdict["rejected"]:
             summary["skipped"] = "below_threshold"
+            # A listing may predate the threshold it now fails, so withdraw it
+            # rather than leaving a losing strategy advertised.
+            delisted = _delist_rejected_templates(
+                user_id,
+                source_id,
+                reason=f"Below publish thresholds ({', '.join(verdict['failed'])})",
+            )
+            if delisted:
+                summary["delisted"] = delisted
             results.append(summary)
             _set_conversion_status(
                 row["script_id_part"],

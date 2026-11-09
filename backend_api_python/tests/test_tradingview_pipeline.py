@@ -9,6 +9,7 @@ strategy whose backtest failed.
 
 from __future__ import annotations
 
+import inspect
 import json
 from datetime import timedelta
 from contextlib import contextmanager
@@ -1146,3 +1147,31 @@ def test_the_nearest_grid_prefers_the_shorter_bar_on_a_tie():
     # 120 minutes is 60 away from 1h and 120 away from 4h: nearest, not a tie.
     assert pipeline_module._interval_minutes("2h") == 120
     assert pipeline_module._nearest_grid_frequency(120) == "1h"
+
+
+def test_a_rejected_strategy_is_withdrawn_if_it_was_already_listed(monkeypatch):
+    """Tightening a threshold must remove listings that predate it.
+
+    Otherwise a strategy that now loses money on its own backtest keeps sitting
+    in the marketplace, because the gate only runs on rows it is about to
+    publish.
+    """
+    cursor, published, result = _threshold_harness(
+        monkeypatch,
+        {"totalTrades": 60, "totalReturn": -18.0, "sharpeRatio": -1.1, "maxDrawdown": -25.0},
+    )
+
+    assert published == []
+    delisted = [item for item in cursor.executed if item[1] and "script_template" in str(item[0])]
+    assert delisted, "a rejected listing must be withdrawn"
+    assert delisted[0][1][-1] == 11  # source_id from the harness candidate
+    assert result["results"][0]["skipped"] == "below_threshold"
+
+
+def test_delisting_only_touches_script_templates():
+    """Official indicator assets share the table and must not be withdrawn."""
+    from app.services import tradingview_pipeline as module
+
+    source = inspect.getsource(module._delist_rejected_templates)
+    assert "asset_type = 'script_template'" in source
+    assert "source_script_source_id = ?" in source
