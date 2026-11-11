@@ -499,6 +499,17 @@ def _p_round(value, precision=None):
     return float(result)
 
 
+def _p_nary(reducer, values):
+    """Fold a binary numpy reducer over Pine's variadic argument list."""
+    items = [item for item in values if item is not None]
+    if not items:
+        return float("nan")
+    result = items[0]
+    for item in items[1:]:
+        result = reducer(result, item)
+    return result
+
+
 def _p_avg(*values):
     numbers = [_p_num(_p_last(item)) for item in values]
     numbers = [item for item in numbers if item == item]
@@ -513,6 +524,16 @@ def _p_math_sum(first, second=None, third=None):
         if extra is not None:
             total += _p_num(_p_last(extra))
     return total
+
+
+def _p_math_max(*values):
+    """Pine ``math.max`` accepts any number of arguments; numpy caps at three."""
+    return _p_nary(np.maximum, values)
+
+
+def _p_math_min(*values):
+    """Pine ``math.min`` accepts any number of arguments; numpy caps at three."""
+    return _p_nary(np.minimum, values)
 
 
 def _p_fill(value, frame):
@@ -591,29 +612,32 @@ def _p_alma(series, length, offset=0.85, sigma=6.0):
     weights = np.exp(-((positions - (window - 1) + pivot) ** 2) / (2.0 * spread * spread))
     total = float(weights.sum())
     if total == 0.0:
-        return series.rolling(window, min_periods=window).mean()
+        return _p_as_series(series).rolling(window, min_periods=window).mean()
 
     def _weighted(window_values):
         return float(np.dot(np.asarray(window_values, dtype="float64"), weights) / total)
 
-    return series.rolling(window, min_periods=window).apply(_weighted, raw=True)
+    return _p_as_series(series).rolling(window, min_periods=window).apply(_weighted, raw=True)
 
 
-def _p_vwma(series, volume, length):
+def _p_vwma(series, length):
+    """Pine's ``ta.vwma`` always weights by the bar's own volume."""
     window = _p_window(length)
-    weighted = (series * volume).rolling(window, min_periods=window).sum()
-    normalizer = volume.rolling(window, min_periods=window).sum()
+    source = _p_as_series(series)
+    weights = _p_as_series(volume_series)
+    weighted = (source * weights).rolling(window, min_periods=window).sum()
+    normalizer = weights.rolling(window, min_periods=window).sum()
     return weighted / normalizer.replace(0.0, np.nan)
 '''
 
 _PRICE_STATS: Final[str] = '''def _p_stdev(series, length):
     window = _p_window(length)
-    return series.rolling(window, min_periods=window).std(ddof=0)
+    return _p_as_series(series).rolling(window, min_periods=window).std(ddof=0)
 
 
 def _p_variance(series, length):
     window = _p_window(length)
-    return series.rolling(window, min_periods=window).var(ddof=0)
+    return _p_as_series(series).rolling(window, min_periods=window).var(ddof=0)
 
 
 def _p_correlation(series, other, length):
@@ -635,11 +659,11 @@ def _p_linreg(series, length, offset=0):
         intercept = float(values.mean() - slope * positions.mean())
         return intercept + slope * (window + int(offset))
 
-    return series.rolling(window, min_periods=window).apply(_value, raw=True)
+    return _p_as_series(series).rolling(window, min_periods=window).apply(_value, raw=True)
 
 
 def _p_cum(series):
-    return series.cumsum()
+    return _p_as_series(series).cumsum()
 
 
 def _p_change(series, length=1):
@@ -652,7 +676,7 @@ def _p_roc(series, length):
 
 
 def _p_mom(series, length):
-    return series.diff(_p_window(length))
+    return _p_as_series(series).diff(_p_window(length))
 
 
 def _p_highest(series, length):
@@ -662,7 +686,7 @@ def _p_highest(series, length):
 
 def _p_lowest(series, length):
     window = _p_window(length)
-    return series.rolling(window, min_periods=window).min()
+    return _p_as_series(series).rolling(window, min_periods=window).min()
 
 
 def _p_highestbars(series, length):
@@ -675,7 +699,7 @@ def _p_highestbars(series, length):
             return np.nan
         return float(positions[int(np.nanargmax(values))] - (window - 1))
 
-    return series.rolling(window, min_periods=window).apply(_value, raw=True)
+    return _p_as_series(series).rolling(window, min_periods=window).apply(_value, raw=True)
 
 
 def _p_lowestbars(series, length):
@@ -688,7 +712,7 @@ def _p_lowestbars(series, length):
             return np.nan
         return float(positions[int(np.nanargmin(values))] - (window - 1))
 
-    return series.rolling(window, min_periods=window).apply(_value, raw=True)
+    return _p_as_series(series).rolling(window, min_periods=window).apply(_value, raw=True)
 
 
 def _p_barssince(condition):
@@ -924,7 +948,7 @@ def _p_percentrank(series, length):
             return np.nan
         return 100.0 * float((values < current).sum()) / float(len(values))
 
-    return series.rolling(window, min_periods=window).apply(_value, raw=True)
+    return _p_as_series(series).rolling(window, min_periods=window).apply(_value, raw=True)
 
 
 def _p_dmi(high, low, close, length, smoothing):

@@ -41,7 +41,10 @@ TA_SPECS: Final[dict[str, TASpec]] = {
         ((0, "close_series"), (1, "20"), (2, "0.85"), (3, "6.0")),
         1,
     ),
-    "vwma": ("vwma", ((0, "close_series"), (None, "volume_series"), (1, "20")), 1),
+    # ``ta.vwma(source, length)`` weights by the bar's own volume; the runtime
+    # helper takes that volume as an explicit argument, so index 1 is the length
+    # and volume is supplied positionally by the helper signature below.
+    "vwma": ("vwma", ((0, "close_series"), (1, "20")), 1),
     "stdev": ("stdev", ((0, "close_series"), (1, "20")), 1),
     "variance": ("variance", ((0, "close_series"), (1, "20")), 1),
     "correlation": (
@@ -359,8 +362,8 @@ TRADE_STAT_VALUES: Final[dict[str, str]] = {
 
 MATH_CALLS: Final[dict[str, str]] = {
     "math.abs": "np.abs",
-    "math.max": "np.maximum",
-    "math.min": "np.minimum",
+    "math.max": "_p_math_max",
+    "math.min": "_p_math_min",
     "math.round": "_p_round",
     "math.floor": "np.floor",
     "math.ceil": "np.ceil",
@@ -390,8 +393,8 @@ GLOBAL_FUNCTIONS: Final[dict[str, str]] = {
     "nz": "_p_nz",
     "na": "_p_isna",
     "fixnan": "_p_fixnan",
-    "max": "np.maximum",
-    "min": "np.minimum",
+    "max": "_p_math_max",
+    "min": "_p_math_min",
     "abs": "np.abs",
     "round": "_p_round",
     "sum": "_p_math_sum",

@@ -799,3 +799,45 @@ if bar_index % 20 == 0
     assert result.ok, result.blockers
     assert "_BAR_COUNTER[0] = _BAR_COUNTER[0] + 1" in result.code
     assert "_bar_index = len(frame) - 1" not in result.code
+
+
+def test_scalar_sources_are_widened_before_rolling_windows():
+    """Pine accepts an input or loop variable as a ``ta.*`` source.
+
+    Passing that scalar straight into pandas raised "object has no attribute
+    rolling", which killed ten strategies at runtime even though they compiled.
+    """
+    source = """
+//@version=5
+strategy("Scalars", overlay=true)
+len = 20
+m = ta.stdev(close, len)
+s = ta.vwma(close, len)
+c = cum(volume)
+if bar_index == 0
+    strategy.entry("Long", strategy.long)
+"""
+
+    result = transpile_pine(source)
+
+    assert result.ok, result.blockers
+    # ``vwma`` weights by the bar's own volume, so only the length is passed.
+    assert "_p_vwma(close_series, 20)" in result.code
+    assert "_p_cum(volume_series)" in result.code
+
+
+def test_variadic_math_max_accepts_more_than_two_arguments():
+    """``math.max`` is variadic in Pine, while ``np.maximum`` is binary."""
+    source = """
+//@version=5
+strategy("Variadic", overlay=true)
+x = math.max(close, open, high, low)
+if bar_index == 0
+    strategy.entry("Long", strategy.long)
+"""
+
+    result = transpile_pine(source)
+
+    assert result.ok, result.blockers
+    assert "_p_math_max(close_series, open_series, high_series, low_series)" in result.code
+    assert "def _p_math_max" in result.code

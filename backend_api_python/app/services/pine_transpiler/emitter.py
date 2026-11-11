@@ -2133,7 +2133,7 @@ _ARGUMENT_HINTS: Final[dict[str, dict[int, tuple[str, ...]]]] = {
     "rma": {0: ("source", "src"), 1: ("length", "len")},
     "wma": {0: ("source", "src"), 1: ("length", "len")},
     "hma": {0: ("source", "src"), 1: ("length", "len")},
-    "vwma": {0: ("source", "src"), 2: ("length", "len")},
+    "vwma": {0: ("source", "src"), 1: ("length", "len")},
     "stdev": {0: ("source", "src"), 1: ("length", "len")},
     "variance": {0: ("source", "src"), 1: ("length", "len")},
     "correlation": {0: ("source_a", "source1"), 1: ("source_b", "source2"), 2: ("length", "len")},
