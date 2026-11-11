@@ -473,6 +473,11 @@ def _p_str_fill(pattern, *values):
     return output
 
 
+def _p_str_length(value):
+    """Pine ``str.length``; ``na`` counts as an empty string."""
+    return len(_p_str(value))
+
+
 def _p_str_upper(value):
     return _p_str(value).upper()
 
@@ -932,11 +937,12 @@ def _p_vwap(high, low, close, volume):
 
 
 def _p_supertrend(high, low, close, factor, length):
-    average_range = _p_atr(high, low, close, length)
-    midpoint = (high + low) / 2.0
-    upper = (midpoint + float(factor) * average_range).to_numpy()
-    lower = (midpoint - float(factor) * average_range).to_numpy()
-    closes = close.to_numpy()
+    average_range = _p_atr(_p_as_series(high), _p_as_series(low), _p_as_series(close), _p_window(length))
+    midpoint = (_p_as_series(high) + _p_as_series(low)) / 2.0
+    multiplier = float(_p_last(factor))
+    upper = (midpoint + multiplier * average_range).to_numpy()
+    lower = (midpoint - multiplier * average_range).to_numpy()
+    closes = _p_as_series(close).to_numpy()
     size = len(closes)
     line = np.full(size, np.nan)
     direction = np.full(size, np.nan)
@@ -1260,12 +1266,28 @@ RUNTIME_HELPER_NAMES: Final[tuple[str, ...]] = (
     "str_lower",
     "str_contains",
     "str_fill",
+    "str_length",
+    "array_size",
 )
 
 
 ARRAY_SUPPORT: Final[str] = '''def _p_array_new(size=0, fill=0.0):
     count = max(0, int(size))
     return [fill for _ in range(count)]
+
+
+def _p_array_size(values):
+    """Pine ``array.size``; a slot that was never filled is an empty array.
+
+    ``var array<box> heat = array.new_box()`` starts as an empty list, so a
+    generated read has to stay usable even when the slot was predeclared with a
+    neutral scalar. Mapping this onto the builtin ``len`` crashed every script
+    that sized an array before its first write.
+    """
+    try:
+        return len(values)
+    except TypeError:
+        return 0
 
 
 def _p_array_get(values, position):

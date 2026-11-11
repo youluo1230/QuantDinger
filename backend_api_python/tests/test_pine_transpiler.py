@@ -841,3 +841,75 @@ if bar_index == 0
     assert result.ok, result.blockers
     assert "_p_math_max(close_series, open_series, high_series, low_series)" in result.code
     assert "def _p_math_max" in result.code
+
+
+def test_array_size_survives_a_slot_that_holds_a_scalar():
+    """``var array<box> heat = array.new_box()`` starts empty, not a number.
+
+    The slot is predeclared with a neutral scalar, so mapping ``array.size``
+    onto the builtin ``len`` raised ``object of type 'float' has no len()`` on
+    every script that sized a drawing array before its first write.
+    """
+    source = """
+//@version=5
+strategy("Array size", overlay=true)
+var array<box> boxes = array.new_box()
+while boxes.size() > 0
+    box.delete(boxes.shift())
+boxes.push(box.new(bar_index, high, bar_index + 2, low))
+if bar_index == 0
+    strategy.entry("Long", strategy.long)
+"""
+
+    result = transpile_pine(source)
+
+    assert result.ok, result.blockers
+    assert "_p_array_size(" in result.code
+    assert "def _p_array_size" in result.code
+
+
+def test_drawing_array_constructors_resolve_to_the_list_helper():
+    """Every ``array.new_*`` overload creates a list, not an undefined name."""
+    source = """
+//@version=5
+strategy("Drawing arrays", overlay=true)
+var array<label> labels = array.new_label()
+var array<line> lines = array.new_line()
+if bar_index == 0
+    strategy.entry("Long", strategy.long)
+"""
+
+    result = transpile_pine(source)
+
+    assert result.ok, result.blockers
+    assert "_p_array_new(" in result.code
+
+
+def test_an_input_default_that_names_a_variable_is_not_hoisted():
+    """``input.time(StartDate, ...)`` must bind after ``StartDate`` exists.
+
+    Hoisting every parameter to the top of ``handle_data`` made the fallback
+    reference a local that had not been assigned yet.
+    """
+    source = """
+//@version=5
+strategy("Input default", overlay=true)
+StartDate = timestamp('15Aug 2022 14:00 +0000')
+testPeriodStart = input.time(StartDate, 'Start of trading')
+if time > testPeriodStart
+    strategy.entry("Long", strategy.long)
+"""
+
+    result = transpile_pine(source)
+
+    assert result.ok, result.blockers
+    assert 'testPeriodStart = context.params.get("testPeriodStart", StartDate)' in result.code
+    hoisted = [line for line in result.code.splitlines() if "testPeriodStart" in line]
+    # The binding has to sit below the assignment that defines StartDate.
+    positions = [
+        index
+        for index, line in enumerate(result.code.splitlines())
+        if "StartDate =" in line or "testPeriodStart =" in line
+    ]
+    assert positions == sorted(positions)
+    assert hoisted

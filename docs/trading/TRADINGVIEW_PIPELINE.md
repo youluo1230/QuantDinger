@@ -75,7 +75,7 @@ See `.env.example` for the full variable list. The important ones:
 | `TRADINGVIEW_HARVEST_MAX_SOURCES` | `60` | Source fetches per run. |
 | `TRADINGVIEW_MIN_SCORE` | `70` | Candidates below this are staged but never converted. |
 | `TRADINGVIEW_MIN_TRADES` | `3` | Minimum trades before a strategy may be listed. |
-| `TRADINGVIEW_TRANSPILER_VERSION` | `8` | Bump to regenerate sources after transpiler changes. Version 5 and 6 translate onto the interval and instrument upstream published, 7 and 8 fix the emitter and helper defects, so anything generated earlier must be rebuilt. |
+| `TRADINGVIEW_TRANSPILER_VERSION` | `9` | Bump to regenerate sources after transpiler changes. Version 5 and 6 translate onto the interval and instrument upstream published, 7 and 8 fix the emitter and helper defects, so anything generated earlier must be rebuilt. |
 | `TRADINGVIEW_BACKTEST_TIMEOUT_SEC` | `300` | Per-strategy backtest ceiling; slow scripts become `timeout`. |
 | `TRADINGVIEW_BACKTEST_DAYS` | `180` | Backtest lookback. Cost grows with the square of the window, so a longer window is rarely worth the queue time. |
 | `TRADINGVIEW_DEFAULT_INSTRUMENT` | `BTC/USDT` | Fallback only. Strategies are evaluated on the instrument TradingView published them for; this applies when that venue has no data source here (for example an ASX listing). |

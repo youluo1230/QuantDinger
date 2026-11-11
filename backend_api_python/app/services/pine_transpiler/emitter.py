@@ -18,6 +18,7 @@ bar indexing
 
 from __future__ import annotations
 
+import ast
 import re
 from typing import Any, Final
 
@@ -673,9 +674,15 @@ class Emitter:
             fallback = rendered or _literal_source(self.params.get(key, {}).get("default"))
             # Parameters are hoisted to the top of ``handle_data`` by the
             # assembler: translated Pine functions read them as closure
-            # variables and must never observe an unbound name.
-            self.param_lines.append(f"{py} = context.params.get(\"{key}\", {fallback})")
-            return []
+            # variables and must never observe an unbound name. A default that
+            # is not a literal (``input.time(StartDate, ...)``) still refers to
+            # a script-level name, so it has to stay below the assignment that
+            # binds it; nested functions only look the name up when they are
+            # called, which is after the whole statement list has run.
+            if _is_literal_expression(fallback):
+                self.param_lines.append(f"{py} = context.params.get(\"{key}\", {fallback})")
+                return []
+            return [f"{indent}{py} = context.params.get(\"{key}\", {fallback})"]
 
         if mode in {"Var", "VarIp"}:
             self.stats["uses_var"] = True
@@ -2234,3 +2241,23 @@ def _literal_source(value: Any) -> str:
     if isinstance(value, (int, float)):
         return repr(value)
     return "0.0"
+
+
+def _is_literal_expression(expression: str) -> bool:
+    """Report whether an expression can be evaluated before the statements run.
+
+    Hoisted ``context.params`` defaults are evaluated at the top of
+    ``handle_data``, so the fallback may only mention literals. A default that
+    names a script variable (``input.time(StartDate, 'Start')``) has to be bound
+    where the Pine source declared it, after that variable exists.
+    """
+    try:
+        tree = ast.parse(str(expression or "").strip(), mode="eval")
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Call, ast.Name)):
+            return False
+        if isinstance(node, ast.Attribute):
+            return False
+    return True

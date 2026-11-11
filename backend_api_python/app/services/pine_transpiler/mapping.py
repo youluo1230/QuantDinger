@@ -486,7 +486,7 @@ STATIC_CONSTANTS.update(
 STRING_CALLS: Final[dict[str, str]] = {
     "str.tostring": "_p_str",
     "str.format": "_p_str_fill",
-    "str.length": "len",
+    "str.length": "_p_str_length",
     "str.upper": "_p_str_upper",
     "str.lower": "_p_str_lower",
     "str.contains": "_p_str_contains",
@@ -510,7 +510,7 @@ ARRAY_CALLS: Final[dict[str, str]] = {
     "array.indexof": "_p_array_index",
     "array.lastindexof": "_p_array_lastindex",
     "array.includes": "_p_array_includes",
-    "array.size": "len",
+    "array.size": "_p_array_size",
     "array.slice": "_p_array_slice",
     "array.join": "_p_array_join",
     "array.concat": "_p_array_concat",
@@ -527,6 +527,12 @@ ARRAY_INTRINSICS: Final[dict[str, str]] = {
     "array.range": "_p_array_range",
     "array.reverse": "_p_array_reverse",
     "array.new_line": "_p_array_new",
+    "array.new_label": "_p_array_new",
+    "array.new_box": "_p_array_new",
+    "array.new_color": "_p_array_new",
+    "array.new_table": "_p_array_new",
+    "array.new_polyline": "_p_array_new",
+    "array.new_linefill": "_p_array_new",
 }
 
 ARRAY_CALLS.update(ARRAY_INTRINSICS)
