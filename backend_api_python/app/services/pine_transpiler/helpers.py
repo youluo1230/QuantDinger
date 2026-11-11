@@ -1014,6 +1014,49 @@ def _p_position_price():
         return float("nan")
 
 
+def _p_closed_trades():
+    """Closed trades the runtime has booked so far.
+
+    Pine's ``strategy.closedtrades`` counters are the backbone of most exit
+    logic, so they must reflect the real ledger rather than a state slot nothing
+    ever writes. Reads go through the runtime binding when it is present and
+    degrade to an empty ledger during compile-time discovery.
+    """
+    try:
+        # Bound by the runtime; absent during compile-time discovery, so a bare
+        # name read (never a call) keeps the emitted code inside the allowed
+        # global-call surface.
+        reader = get_closed_trades
+    except NameError:
+        return []
+    try:
+        return list(reader() or ())
+    except Exception:
+        return []
+
+
+def _p_closed_trade(index, field, default=None):
+    """Read a field from a closed trade, counting back from the newest."""
+    if default is None:
+        default = float("nan")
+    trades = _p_closed_trades()
+    try:
+        offset = int(float(index))
+    except (TypeError, ValueError):
+        offset = 0
+    # Pine indexes back from the most recent closed trade: 0 is the newest.
+    position = len(trades) - 1 - offset if offset >= 0 else -offset - 1
+    if position < 0 or position >= len(trades):
+        return default
+    value = trades[position].get(field, default)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return value
+
+
 def _p_open_trades():
     position = get_position(_SYMBOL)
     if position is None:
@@ -1049,8 +1092,8 @@ def _p_open_trade_count():
 
 
 def _p_close_trade_count():
-    """Closed-trade count, read from the state slot the strategy maintains."""
-    return float(_STATE.get("closed_trades", 0.0))
+    """Number of trades the runtime has closed so far."""
+    return float(len(_p_closed_trades()))
 
 
 def _p_position_profit():
@@ -1073,11 +1116,51 @@ def _p_position_entry_bar():
 
 
 def _p_win_trade_count():
-    return float(_STATE.get("win_trades", 0.0))
+    """Closed trades that booked a profit."""
+    total = 0.0
+    for trade in _p_closed_trades():
+        try:
+            if float(trade.get("profit") or 0.0) > 0.0:
+                total += 1.0
+        except (TypeError, ValueError):
+            continue
+    return total
 
 
 def _p_loss_trade_count():
-    return float(_STATE.get("loss_trades", 0.0))
+    """Closed trades that booked a loss."""
+    total = 0.0
+    for trade in _p_closed_trades():
+        try:
+            if float(trade.get("profit") or 0.0) < 0.0:
+                total += 1.0
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+def _p_closed_profit(index=0):
+    return _p_closed_trade(index, "profit")
+
+
+def _p_closed_size(index=0):
+    return _p_closed_trade(index, "quantity")
+
+
+def _p_closed_entry_time(index=0):
+    return _p_closed_trade(index, "entry_time")
+
+
+def _p_closed_exit_time(index=0):
+    return _p_closed_trade(index, "exit_time")
+
+
+def _p_closed_entry_price(index=0):
+    return _p_closed_trade(index, "entry_price")
+
+
+def _p_closed_exit_price(index=0):
+    return _p_closed_trade(index, "exit_price")
 
 
 def _p_col(frame, name):
@@ -1103,6 +1186,14 @@ RUNTIME_HELPER_NAMES: Final[tuple[str, ...]] = (
     "position_entry_bar",
     "win_trade_count",
     "loss_trade_count",
+    "closed_trades",
+    "closed_trade",
+    "closed_profit",
+    "closed_size",
+    "closed_entry_time",
+    "closed_exit_time",
+    "closed_entry_price",
+    "closed_exit_price",
     "int",
     "float",
     "bool",

@@ -112,6 +112,7 @@ class Emitter:
             "dropped_statements": 0,
             "unsupported_calls": [],
             "unsupported_namespaces": [],
+            "unresolved": [],
             "uses_var": False,
             "uses_for": False,
             "uses_while": False,
@@ -1064,7 +1065,17 @@ class Emitter:
         if kind == "Attribute":
             return self._attribute_ref(node)
         if kind == "Call":
-            return self._expr_call(node)
+            rendered = self._expr_call(node)
+            if not rendered:
+                # An unmapped call must not disappear from the expression it sits
+                # in. Returning "" deleted the operand outright, so
+                # ``180 * acos(0.5) / 3`` quietly became ``180 / 3`` and
+                # ``x = iff(c, 1, 2)`` dropped the whole assignment, leaving
+                # later reads of ``x`` as NameError. A NaN poisons the arithmetic
+                # visibly instead, and ``stats["unresolved"]`` names the culprit.
+                self._note_unresolved(self._dotted(getattr(node, "func", None)) or "?")
+                return "float('nan')"
+            return rendered
         if kind == "BinOp":
             return self._binary(node)
         if kind == "BoolOp":
@@ -1449,6 +1460,14 @@ class Emitter:
             chain = self._dotted(getattr(node, "func", None))
             if chain.startswith("strategy."):
                 member = chain[len("strategy."):]
+                # Indexed form: ``strategy.closedtrades.profit(0)`` needs the
+                # trade offset, which the zero-argument properties cannot take.
+                indexed = mapping.CLOSED_TRADE_CALLS.get(member)
+                arguments = [self._expr(item) for item in self._positional(node)]
+                arguments = [item for item in arguments if item]
+                if indexed:
+                    self._register_helper(indexed)
+                    return f"{indexed}({', '.join(arguments) or '0'})"
                 target = mapping.TRADE_STAT_CALLS.get(member)
                 if target:
                     self._register_helper(target)
@@ -1458,13 +1477,24 @@ class Emitter:
         if owner == "color":
             self._warn_once(f"color_dropped:{name}")
             return "0"
-        if owner in {"table", "label", "line", "box", "polyline", "alert", "log"}:
+        if owner in {"table", "label", "line", "box", "polyline", "linefill", "alert", "log"}:
             return ""
         dotted = self._dotted(getattr(node, "func", None))
         if dotted in mapping.GLOBAL_FUNCTIONS:
             return self._global_call(dotted, node)
         if name in mapping.GLOBAL_FUNCTIONS and not owner:
             return self._global_call(name, node)
+        if not owner and name in mapping.FLAT_SERIES_CALLS:
+            # Pine v3 and earlier dropped the source argument entirely
+            # (``lowest(20)``); v4 and later pass it explicitly. Dispatch on the
+            # argument count so both spellings reach the right helper.
+            positional = list(self._positional(node))
+            if len(positional) <= 1:
+                target, series = mapping.FLAT_SERIES_CALLS[name]
+                values = [self._expr(item) for item in positional]
+                values = [item for item in values if item]
+                self._register_helper(target)
+                return f"{target}({series}, {values[0] if values else '14'})"
         if not owner and name in mapping.TA_SPECS:
             # Older Pine versions allow omitting the ``ta.`` namespace.
             return self._ta_call(name, node)
@@ -1716,6 +1746,22 @@ class Emitter:
                         return rendered
         return None
 
+    def _note_unresolved(self, name: str) -> None:
+        """Record a name the emitter could not lower, for the pipeline to see."""
+        if not name or name in {"?"}:
+            return
+        # Drawing namespaces have no value in the strategy runtime: they are
+        # legible no-ops, not gaps in translation. Only report calls whose result
+        # the strategy might actually have used.
+        head = name.split(".")[0]
+        if head in {"plot", "plotchar", "plotshape", "plotcandle", "plotbar",
+                    "bgcolor", "barcolor", "fill", "hline", "alert", "log",
+                    "table", "line", "label", "box", "polyline"}:
+            return
+        self.stats["unresolved"] = list(
+            dict.fromkeys([*self.stats.get("unresolved", []), name])
+        )
+
     def _static_constant(self, key: str) -> str | None:
         """Return a mapped static constant, registering the helpers it uses."""
         rendered = mapping.STATIC_CONSTANTS.get(key)
@@ -1865,6 +1911,9 @@ class Emitter:
         target = mapping.GLOBAL_FUNCTIONS.get(name)
         if target is None:
             return ""
+        # Aliases such as ``cum`` resolve to a helper rather than a numpy
+        # builtin, so the definition has to be pulled into the module.
+        self._register_helper(target)
         arguments = [self._expr(item) for item in self._positional(node)]
         arguments = [item for item in arguments if item]
         if not arguments:

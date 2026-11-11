@@ -403,6 +403,7 @@ def _module_constants(*, symbol: str, frequency: str) -> list[str]:
         '_ENTRY_NAME = "pine"',
         "_bar_index = 0",
         "_time = 0",
+        "_BAR_COUNTER = [0]",
         "_FRAME_REF = [None]",
         "open_series = None",
         "high_series = None",
@@ -513,11 +514,15 @@ def _handle_data_function(
         "    ohlc4_series = (open_series + high_series + low_series + close_series) / 4.0",
         "    hlcc4_series = (close_series * 2.0 + high_series + low_series) / 4.0",
         "    _FRAME_REF[0] = frame",
-        "    _bar_index = len(frame) - 1",
+        # Pine's bar_index counts bars since the script started. The history
+        # window saturates at _WARMUP bars, so len(frame) stops growing and
+        # would freeze every `bar_index % n` guard at the same value.
+        "    _BAR_COUNTER[0] = _BAR_COUNTER[0] + 1",
+        "    _bar_index = _BAR_COUNTER[0] - 1",
         "    _time = int(_p_last(_p_time_series(frame)))",
-        "    _closed_trades = _STATE.get(\"closed_trades\", 0)",
-        "    _win_trades = _STATE.get(\"win_trades\", 0)",
-        "    _loss_trades = _STATE.get(\"loss_trades\", 0)",
+        "    _closed_trades = _p_close_trade_count()",
+        "    _win_trades = _p_win_trade_count()",
+        "    _loss_trades = _p_loss_trade_count()",
     ]
     lines.extend(sorted(emitted.get("predeclared") or []))
     # Translated Pine functions read ``context.params`` values as closure

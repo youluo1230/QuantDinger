@@ -273,6 +273,10 @@ TIME_COMPONENT_CALLS: Final[frozenset[str]] = frozenset(
 #: Builtins that are only constants when the script does not shadow them.
 SOFT_CONSTANTS: Final[dict[str, str]] = {
     "tr": "_p_true_range(high_series, low_series, close_series)",
+    # ``vwap`` is ``ta.vwap`` in v4+, but v1-v3 also expose it bare, acting on the
+    # bar's own high/low/close/volume. Soft rather than static so a script that
+    # assigns its own ``vwap`` shadowing this is still honoured.
+    "vwap": "_p_vwap(high_series, low_series, close_series, volume_series)",
 }
 
 #: ``barstate`` flags describe the replay loop itself. The runtime only ever calls
@@ -324,9 +328,27 @@ TRADE_STAT_CALLS: Final[dict[str, str]] = {
     "opentrades.size": "_p_position_size",
     "opentrades.profit": "_p_position_profit",
     "opentrades.entry_bar_index": "_p_position_entry_bar",
-    "closedtrades.profit": "_p_position_profit",
+    # A bare ``strategy.closedtrades.profit`` is realised PnL; the indexed form
+    # is handled by CLOSED_TRADE_CALLS before this table is consulted.
+    "closedtrades.profit": "_p_closed_profit",
     "closedtrades.win_count": "_p_win_trade_count",
     "closedtrades.loss_count": "_p_loss_trade_count",
+    "closedtrades.size": "_p_closed_size",
+    "closedtrades.entry_price": "_p_closed_entry_price",
+    "closedtrades.exit_price": "_p_closed_exit_price",
+    "closedtrades.entry_time": "_p_closed_entry_time",
+    "closedtrades.exit_time": "_p_closed_exit_time",
+}
+
+#: Indexed ``strategy.closedtrades.*(index)`` accessors. Unlike the plain
+#: properties above these take the trade offset as their only argument.
+CLOSED_TRADE_CALLS: Final[dict[str, str]] = {
+    "closedtrades.profit": "_p_closed_profit",
+    "closedtrades.size": "_p_closed_size",
+    "closedtrades.entry_price": "_p_closed_entry_price",
+    "closedtrades.exit_price": "_p_closed_exit_price",
+    "closedtrades.entry_time": "_p_closed_entry_time",
+    "closedtrades.exit_time": "_p_closed_exit_time",
 }
 
 #: Scalar ``strategy.*`` counters.
@@ -381,7 +403,81 @@ GLOBAL_FUNCTIONS: Final[dict[str, str]] = {
     "exp": "np.exp",
     "floor": "np.floor",
     "ceil": "np.ceil",
+    # v1-v3 flat math builtins. These are the pre-namespace spellings of
+    # ``math.*``; the corpus still uses them heavily (``acos``/``atan`` appear in
+    # every angle-of-trend script), and without them the call renders to an empty
+    # string, which silently deletes the operand from the surrounding arithmetic.
+    "acos": "np.arccos",
+    "asin": "np.arcsin",
+    "atan": "np.arctan",
+    "cos": "np.cos",
+    "sin": "np.sin",
+    "tan": "np.tan",
+    "atan2": "np.arctan2",
+    "cosh": "np.cosh",
+    "sinh": "np.sinh",
+    "tanh": "np.tanh",
+    "log10": "np.log10",
+    "todegrees": "np.degrees",
+    "toradians": "np.radians",
+    "iff": "_p_ternary",
+    "cum": "_p_cum",
+    # ``highest``/``lowest`` live in FLAT_SERIES_CALLS instead: their arity
+    # differs between Pine v3 and v4+, so one fixed target cannot serve both and
+    # a GLOBAL_FUNCTIONS entry here would shadow that dispatch.
 }
+
+#: v1-v3 ``highest``/``lowest``/``cum`` act on the bar's own high/low/close and
+#: take only a length, unlike their ``ta.`` namespaced forms which take a series
+#: first. They are rewritten to the same helpers with the series supplied.
+FLAT_SERIES_CALLS: Final[dict[str, tuple[str, str]]] = {
+    "highest": ("_p_highest", "high_series"),
+    "lowest": ("_p_lowest", "low_series"),
+    # ``cum`` is the exception: Pine has always passed the source explicitly
+    # (``cum(volume)``), so it is a plain one-argument helper instead.
+}
+
+#: Colours are palette constants in Pine, not series. The runtime has no colour
+#: model, so every one collapses to a sentinel; keeping the name bound stops it
+#: from being read as an undefined Python identifier.
+STATIC_CONSTANTS.update(
+    {
+        f"color.{name}": f"'{name}'"
+        for name in (
+            "aqua", "black", "blue", "fuchsia", "gray", "green", "lime",
+            "maroon", "navy", "olive", "orange", "purple", "red", "silver",
+            "teal", "white", "yellow",
+        )
+    }
+)
+#: Bare colour names are v1-v3 spellings that predate the ``color.`` namespace.
+STATIC_CONSTANTS.update(
+    {
+        name: f"'{name}'"
+        for name in (
+            "aqua", "black", "blue", "fuchsia", "gray", "green", "lime",
+            "maroon", "navy", "olive", "orange", "purple", "red", "silver",
+            "teal", "white", "yellow",
+        )
+    }
+)
+
+#: Pine bar-state and session builtins that have no per-bar Python equivalent but
+#: must still resolve to *something* the strategy can compare.
+STATIC_CONSTANTS.update(
+    {
+        "time_close": "_time",
+        "time_tradingday": "_time",
+        "timenow": "_time",
+        "last_bar_time": "_time",
+        "last_bar_index": "_bar_index",
+        "tickerid": "_SYMBOL",
+        "syminfo.tickerid": "_SYMBOL",
+        # ``time(...)``/``security``-adjacent aliases that appear bare in v3
+        # sources; the runtime has no session model, so the bar time stands in.
+        "period": "_TIMEFRAME",
+    }
+)
 
 #: Pine string helpers rewritten to Python or helper equivalents.
 STRING_CALLS: Final[dict[str, str]] = {

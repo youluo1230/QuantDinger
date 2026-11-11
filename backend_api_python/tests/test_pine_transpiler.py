@@ -677,3 +677,125 @@ if new_month
     assert result.ok, result.blockers
     assert '_p_shift(_p_time_component("month"), 1)' in result.code
     assert _compiles(result.code)
+
+
+def test_unmapped_calls_never_render_to_an_empty_string():
+    """A dropped operand must not silently delete itself from an expression.
+
+    ``180 * acos(0.5) / 3`` used to render as ``_p_div(180, 3)`` because
+    ``acos`` had no mapping and returned ``""``. The assignment then looked
+    valid but computed a different number, which is the hardest class of
+    transpiler bug to notice.
+    """
+    source = """
+//@version=5
+strategy("Angles", overlay=true)
+x = 180 * acos(0.5) / 3
+if bar_index == 0
+    strategy.entry("Long", strategy.long)
+"""
+
+    result = transpile_pine(source)
+
+    assert result.ok, result.blockers
+    assert "np.arccos" in result.code
+    assert "_p_div(180, 3)" not in result.code
+
+
+def test_unknown_calls_become_nan_instead_of_vanishing():
+    """Unmapped call sites must bind a value so downstream reads still work."""
+    source = """
+//@version=5
+strategy("Unknown", overlay=true)
+x = totallyNotAPineBuiltin(close)
+if bar_index == 0
+    strategy.entry("Long", strategy.long)
+"""
+
+    result = transpile_pine(source)
+
+    assert result.ok, result.blockers
+    assert "totallyNotAPineBuiltin" in "".join(result.stats.get("unresolved") or []) or (
+        "float('nan')" in result.code
+    )
+
+
+def test_pine_v3_flat_series_calls_use_the_bar_series():
+    """``lowest(20)`` predates the ``ta.`` namespace and takes only a length."""
+    source = """
+//@version=5
+strategy("Flat", overlay=true)
+lo = lowest(20)
+if bar_index == 0
+    strategy.entry("Long", strategy.long)
+"""
+
+    result = transpile_pine(source)
+
+    assert result.ok, result.blockers
+    assert "_p_lowest(low_series, 20)" in result.code
+    assert "def _p_lowest" in result.code
+
+
+def test_flat_cum_passes_the_explicit_source():
+    """``cum`` always took a source argument, unlike its flat siblings."""
+    source = """
+//@version=5
+strategy("Cum", overlay=true)
+v = cum(volume)
+if bar_index == 0
+    strategy.entry("Long", strategy.long)
+"""
+
+    result = transpile_pine(source)
+
+    assert result.ok, result.blockers
+    assert "_p_cum(volume_series)" in result.code
+    assert "def _p_cum" in result.code
+
+
+def test_closed_trade_counters_read_the_runtime_ledger():
+    """Pine exit logic keys off ``strategy.closedtrades``; it must not be frozen.
+
+    The counters used to read a ``_STATE`` slot that nothing ever wrote, so
+    every ``strategy.closedtrades > 0`` guard was permanently false and any
+    scale-out or trailing logic built on it never ran.
+    """
+    source = """
+//@version=5
+strategy("Counters", overlay=true)
+if strategy.closedtrades > 0 and strategy.closedtrades.profit(0) > 0
+    strategy.entry("Long", strategy.long)
+if bar_index == 0
+    strategy.entry("First", strategy.long)
+"""
+
+    result = transpile_pine(source)
+
+    assert result.ok, result.blockers
+    assert "_p_close_trade_count()" in result.code
+    assert "_p_closed_profit(" in result.code
+    assert "def _p_close_trade_count" in result.code
+    assert "_STATE.get(\"closed_trades\"" not in result.code
+
+
+def test_bar_index_advances_past_the_warmup_window():
+    """``bar_index`` must count bars, not the length of the history window.
+
+    ``get_history(_WARMUP, ...)`` saturates at the warmup length, so deriving
+    the index from ``len(frame)`` froze it forever at ``_WARMUP - 1``. Every
+    ``bar_index % n`` schedule then fired exactly once (or never), which made
+    simple entry/exit strategies report zero trades.
+    """
+    source = """
+//@version=5
+strategy("Index", overlay=true)
+if bar_index % 20 == 0
+    strategy.entry("Long", strategy.long)
+"""
+
+    result = transpile_pine(source)
+
+    assert result.ok, result.blockers
+    assert "_BAR_COUNTER[0] = _BAR_COUNTER[0] + 1" in result.code
+    assert "_bar_index = len(frame) - 1" not in result.code

@@ -1990,6 +1990,12 @@ class StrategyV2BacktestRunner:
             "set_default_protection": ctx.set_default_protection,
             "get_position": ctx.get_position,
             "get_positions": ctx.get_positions,
+            # Pine-derived strategies read Pine's trade counters, which have no
+            # Strategy API equivalent. Expose the ledger when this session runs
+            # a simulation broker so those helpers report real numbers.
+            "get_closed_trades": lambda: list(
+                getattr(getattr(self, "broker", None), "closed_trades", ()) or ()
+            ),
             "get_order_status": ctx.get_order_status,
             "cancel_order": ctx.cancel_order,
             "consume_last_exit_reason": ctx.consume_last_exit_reason,
@@ -2877,6 +2883,12 @@ class StrategyV2LiveSession:
             "set_default_protection": ctx.set_default_protection,
             "get_position": ctx.get_position,
             "get_positions": ctx.get_positions,
+            # Pine-derived strategies read Pine's trade counters, which have no
+            # Strategy API equivalent. Expose the ledger when this session runs
+            # a simulation broker so those helpers report real numbers.
+            "get_closed_trades": lambda: list(
+                getattr(getattr(self, "broker", None), "closed_trades", ()) or ()
+            ),
             "get_order_status": ctx.get_order_status,
             "cancel_order": ctx.cancel_order,
             "consume_last_exit_reason": ctx.consume_last_exit_reason,
