@@ -442,6 +442,37 @@ def _p_str(value, pattern=None):
     return str(number)
 
 
+def _p_str_fill(pattern, *values):
+    """Pine's ``str.format``: a template with ``{0}``/``{1}`` placeholders.
+
+    ``str.format`` itself is unavailable: the sandbox bans it because dotted
+    format fields resolve attributes implicitly, bypassing the source-level
+    dunder checks. The placeholder grammar Pine uses is small enough to
+    substitute directly.
+    """
+    template = _p_str(pattern)
+    rendered = [_p_str(value) for value in values]
+    output = ""
+    index = 0
+    while index < len(template):
+        character = template[index]
+        if character != "{":
+            output += character
+            index += 1
+            continue
+        close = template.find("}", index + 1)
+        if close < 0:
+            output += template[index:]
+            break
+        slot = template[index + 1:close]
+        if slot.isdigit() and int(slot) < len(rendered):
+            output += rendered[int(slot)]
+        else:
+            output += template[index:close + 1]
+        index = close + 1
+    return output
+
+
 def _p_str_upper(value):
     return _p_str(value).upper()
 
@@ -833,7 +864,7 @@ def _p_atr(high, low, close, length):
 
 
 def _p_rsi(series, length):
-    delta = series.diff()
+    delta = _p_as_series(series).diff()
     gain = delta.clip(lower=0.0)
     loss = (-delta).clip(lower=0.0)
     average_gain = _p_rma(gain, length)
@@ -884,8 +915,8 @@ def _p_wpr(close, high, low, length):
 
 
 def _p_mfi(high, low, close, volume, length):
-    typical = (high + low + close) / 3.0
-    flow = typical * volume
+    typical = (_p_as_series(high) + _p_as_series(low) + _p_as_series(close)) / 3.0
+    flow = typical * _p_as_series(volume)
     delta = typical.diff()
     positive = flow.where(delta > 0.0, 0.0).rolling(_p_window(length), min_periods=_p_window(length)).sum()
     negative = flow.where(delta < 0.0, 0.0).rolling(_p_window(length), min_periods=_p_window(length)).sum()
@@ -952,6 +983,8 @@ def _p_percentrank(series, length):
 
 
 def _p_dmi(high, low, close, length, smoothing):
+    high = _p_as_series(high)
+    low = _p_as_series(low)
     upward = high.diff()
     downward = -low.diff()
     plus_move = pd.Series(np.where((upward > downward) & (upward > 0.0), upward, 0.0), index=high.index)
@@ -1222,6 +1255,11 @@ RUNTIME_HELPER_NAMES: Final[tuple[str, ...]] = (
     "float",
     "bool",
     "col",
+    "str",
+    "str_upper",
+    "str_lower",
+    "str_contains",
+    "str_fill",
 )
 
 

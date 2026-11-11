@@ -1271,10 +1271,12 @@ class Emitter:
         operator = self._binary_operator(getattr(node, "op", None))
         if not left or not right or operator is None:
             return left or right or ""
-        if operator == "+" and (
-            self._is_text(getattr(node, "left", None)) or self._is_text(getattr(node, "right", None))
-        ):
-            # Pine's ``+`` concatenates strings; Python refuses str + number.
+        if operator == "+":
+            # Pine's ``+`` concatenates when either side happens to be a string,
+            # and the runtime has no static types to prove otherwise: a colour
+            # sentinel or an ``input.string`` read through a variable looks
+            # numeric at emit time and only fails on the bar. Routing every
+            # addition through the helper keeps both cases working.
             self._register_helper("_p_add")
             return f"_p_add({left}, {right})"
         if operator == "/":

@@ -485,7 +485,7 @@ STATIC_CONSTANTS.update(
 #: Pine string helpers rewritten to Python or helper equivalents.
 STRING_CALLS: Final[dict[str, str]] = {
     "str.tostring": "_p_str",
-    "str.format": "_p_str",
+    "str.format": "_p_str_fill",
     "str.length": "len",
     "str.upper": "_p_str_upper",
     "str.lower": "_p_str_lower",
