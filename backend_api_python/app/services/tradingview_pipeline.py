@@ -1137,7 +1137,11 @@ _WINDOW_TOO_WIDE_MARKERS = (
 )
 
 #: Windows to fall back to, in days, when the preferred one is unavailable.
-_RETRY_WINDOWS = (90, 60, 45, 30, 21, 14, 10, 7, 3)
+# The floor is one day, not three: minute-bar venues keep only the most recent
+# couple of thousand candles (about 1.4 days), and they refuse a window that
+# starts earlier rather than trimming it. A 3-day floor meant a 1m strategy
+# could never be backtested on those venues at all.
+_RETRY_WINDOWS = (90, 60, 45, 30, 21, 14, 10, 7, 3, 2, 1)
 
 
 #: Markers for a failure the harness caused rather than the strategy. A data

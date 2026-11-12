@@ -1591,3 +1591,17 @@ def test_provider_failures_are_retried_behind_the_untried_rows():
     assert "ORDER BY (c.status = 'no_data')" in sql, (
         "no_data must sort behind untried rows, or an outage consumes the batch"
     )
+
+
+def test_the_retry_ladder_reaches_a_minute_bar_venue(monkeypatch):
+    """A minute-bar venue keeps only hours of history and refuses longer windows.
+
+    Several crypto venues serve the most recent couple of thousand candles and
+    reject a request that starts before them instead of trimming it, so a 1m
+    strategy needs a window of about a day. A ladder that stopped at three days
+    could never succeed there, and the failure looked like a strategy defect.
+    """
+    assert min(pipeline_module._RETRY_WINDOWS) <= 1
+    assert pipeline_module._RETRY_WINDOWS == tuple(
+        sorted(pipeline_module._RETRY_WINDOWS, reverse=True)
+    ), "the ladder must narrow monotonically"
