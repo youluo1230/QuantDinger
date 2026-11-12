@@ -2144,6 +2144,74 @@ CREATE TABLE IF NOT EXISTS qd_exchange_credentials (
 CREATE INDEX IF NOT EXISTS idx_exchange_credentials_user_id ON qd_exchange_credentials(user_id);
 
 -- =============================================================================
+-- 13b. Market candle store
+-- =============================================================================
+-- Bars are stored so the chart and the backtester read one durable answer
+-- instead of two process-local caches that disagree and vanish on restart.
+
+CREATE TABLE IF NOT EXISTS qd_market_candles (
+    id BIGSERIAL PRIMARY KEY,
+    market VARCHAR(32) NOT NULL,
+    symbol VARCHAR(64) NOT NULL,
+    timeframe VARCHAR(8) NOT NULL,
+    exchange_id VARCHAR(32) NOT NULL DEFAULT '',
+    market_type VARCHAR(16) NOT NULL DEFAULT '',
+    instrument_id VARCHAR(64) NOT NULL DEFAULT '',
+    bar_time BIGINT NOT NULL,
+    open NUMERIC(24, 10) NOT NULL,
+    high NUMERIC(24, 10) NOT NULL,
+    low NUMERIC(24, 10) NOT NULL,
+    close NUMERIC(24, 10) NOT NULL,
+    volume NUMERIC(28, 10) NOT NULL DEFAULT 0,
+    fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_market_candles_bar UNIQUE (market, symbol, timeframe, exchange_id, market_type, instrument_id, bar_time)
+);
+
+CREATE INDEX IF NOT EXISTS idx_market_candles_stream_time
+    ON qd_market_candles (market, symbol, timeframe, exchange_id, market_type, instrument_id, bar_time);
+
+CREATE INDEX IF NOT EXISTS idx_market_candles_time
+    ON qd_market_candles (bar_time);
+
+CREATE TABLE IF NOT EXISTS qd_market_candle_ranges (
+    id BIGSERIAL PRIMARY KEY,
+    market VARCHAR(32) NOT NULL,
+    symbol VARCHAR(64) NOT NULL,
+    timeframe VARCHAR(8) NOT NULL,
+    exchange_id VARCHAR(32) NOT NULL DEFAULT '',
+    market_type VARCHAR(16) NOT NULL DEFAULT '',
+    instrument_id VARCHAR(64) NOT NULL DEFAULT '',
+    covered_from BIGINT NOT NULL,
+    covered_to BIGINT NOT NULL,
+    bar_count INTEGER NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_market_candle_ranges_stream UNIQUE (market, symbol, timeframe, exchange_id, market_type, instrument_id, covered_from)
+);
+
+CREATE INDEX IF NOT EXISTS idx_market_candle_ranges_stream
+    ON qd_market_candle_ranges (market, symbol, timeframe, exchange_id, market_type, instrument_id, covered_from, covered_to);
+
+CREATE TABLE IF NOT EXISTS qd_market_candle_fetches (
+    id BIGSERIAL PRIMARY KEY,
+    market VARCHAR(32) NOT NULL,
+    symbol VARCHAR(64) NOT NULL,
+    timeframe VARCHAR(8) NOT NULL,
+    exchange_id VARCHAR(32) NOT NULL DEFAULT '',
+    market_type VARCHAR(16) NOT NULL DEFAULT '',
+    instrument_id VARCHAR(64) NOT NULL DEFAULT '',
+    requested_from BIGINT NOT NULL DEFAULT 0,
+    requested_to BIGINT NOT NULL DEFAULT 0,
+    bars_returned INTEGER NOT NULL DEFAULT 0,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    outcome VARCHAR(32) NOT NULL DEFAULT 'unknown',
+    detail TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_market_candle_fetches_stream
+    ON qd_market_candle_fetches (market, symbol, timeframe, created_at DESC);
+
+-- =============================================================================
 -- 14. Manual Positions
 -- =============================================================================
 

@@ -18,6 +18,7 @@ from app.data_sources.errors import (
     classify_market_data_failure,
 )
 from app.services.backtest_cache import KlineCache
+from app.services.market_data.service import fetch_range_through_layer
 from app.services.market_schedule import equity_data_market, equity_bar_session_date
 from app.utils.logger import get_logger
 
@@ -280,7 +281,21 @@ def _load_strategy_frame_uncached(
                 after_time=after_time,
             )
         else:
-            rows = None
+            # The candle store may already hold this window: a chart that was
+            # opened yesterday, or an earlier run of this same backtest, has
+            # paid for the download once. It answers only when the whole window
+            # is covered, because this loader rejects partial histories below
+            # and a half-filled frame would fail the run instead of the fetch.
+            rows = fetch_range_through_layer(
+                market=effective_market,
+                symbol=effective_symbol,
+                timeframe=provider_timeframe,
+                start=int(start_utc.timestamp()),
+                end=int(provider_end_utc.timestamp()),
+                exchange_id=exchange_id if effective_market == market else None,
+                market_type=market_type if effective_market == market else None,
+                instrument_id=instrument_id,
+            )
         kwargs = {
             "market": effective_market,
             "symbol": effective_symbol,

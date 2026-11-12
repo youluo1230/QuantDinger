@@ -35,6 +35,44 @@ def cleanup_runtime_metadata() -> dict:
 
 @celery_app.task(
     bind=True,
+    name="quantdinger.tasks.prune_market_candles",
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_jitter=True,
+    max_retries=3,
+)
+def prune_market_candles(self) -> dict:
+    """Trim the candle store to its retention window.
+
+    The store exists so a backtest and a chart share one download, which means
+    it grows without bound by design. Retention is per-bar-age rather than
+    per-stream: the oldest data is the least likely to be asked for again, and
+    a range that still claims coverage for deleted bars would make every read
+    compute a gap it never refills.
+    """
+    del self
+    if not _enabled("MARKET_DATA_LAYER_ENABLED", default="false"):
+        return {"skipped": True, "reason": "disabled"}
+    import time
+
+    from app.services.market_data import MarketCandleRepository
+
+    retention_days = max(1, int(os.getenv("MARKET_DATA_RETENTION_DAYS", "400")))
+    audit_days = max(1, int(os.getenv("MARKET_DATA_AUDIT_RETENTION_DAYS", "14")))
+    now = int(time.time())
+    repository = MarketCandleRepository()
+    bars = repository.prune_before(now - retention_days * 86400)
+    audits = repository.prune_audit_before(now - audit_days * 86400)
+    return {
+        "retention_days": retention_days,
+        "audit_retention_days": audit_days,
+        "deleted_bars": bars,
+        "deleted_audits": audits,
+    }
+
+
+@celery_app.task(
+    bind=True,
     name="quantdinger.tasks.reflection",
     autoretry_for=(Exception,),
     retry_backoff=True,

@@ -9,6 +9,7 @@ from app.services.kline import KlineService
 from app.utils.logger import get_logger
 from app.services.market.watchlist import validate_watchlist_pair
 from app.services.market_context import MarketContext, SUPPORTED_CRYPTO_EXCHANGE_IDS
+from app.services.market_data.service import fetch_through_layer
 from app.utils.request_guard import RequestGuardError, cache_key, guarded_cached
 
 logger = get_logger(__name__)
@@ -114,12 +115,16 @@ def get_kline():
         logger.info(f"Requesting K-lines: {market}:{symbol}, timeframe={timeframe}, limit={limit}")
         
         policy = _guard_policy(timeframe, limit, before_time)
-        klines = guarded_cached(
-            cache_key(
-                "indicator_kline_history_v2", market, symbol, timeframe, limit, before_time or "",
-                exchange_id or "", market_type or "", instrument_id,
-            ),
-            lambda: kline_service.get_kline(
+
+        def _load_klines():
+            """Serve from the candle store when it is enabled, else go upstream.
+
+            The store answers repeats without a network call, which is what lets
+            a backtest and a chart share one download. ``fetch_through_layer``
+            returns None whenever it cannot answer, so a deployment without the
+            migration keeps working on the old path.
+            """
+            stored = fetch_through_layer(
                 market=market,
                 symbol=symbol,
                 timeframe=timeframe,
@@ -128,7 +133,26 @@ def get_kline():
                 exchange_id=exchange_id,
                 market_type=market_type,
                 instrument_id=instrument_id,
+            )
+            if stored is not None:
+                return stored
+            return kline_service.get_kline(
+                market=market,
+                symbol=symbol,
+                timeframe=timeframe,
+                limit=limit,
+                before_time=before_time,
+                exchange_id=exchange_id,
+                market_type=market_type,
+                instrument_id=instrument_id,
+            )
+
+        klines = guarded_cached(
+            cache_key(
+                "indicator_kline_history_v2", market, symbol, timeframe, limit, before_time or "",
+                exchange_id or "", market_type or "", instrument_id,
             ),
+            _load_klines,
             ttl_sec=policy['ttl_sec'],
             stale_ttl_sec=policy['stale_ttl_sec'],
             timeout_sec=policy['timeout_sec'],

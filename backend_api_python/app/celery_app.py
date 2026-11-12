@@ -65,6 +65,7 @@ celery_app.conf.update(
         "quantdinger.tasks.fundamental_sync_tick": {"queue": "maintenance"},
         "quantdinger.tasks.worker_heartbeat": {"queue": "maintenance"},
         "quantdinger.tasks.cleanup_runtime_metadata": {"queue": "maintenance"},
+        "quantdinger.tasks.prune_market_candles": {"queue": "maintenance"},
         "quantdinger.tasks.tradingview_harvest": {"queue": "maintenance"},
         "quantdinger.tasks.tradingview_assess": {"queue": "maintenance"},
         "quantdinger.tasks.tradingview_convert": {"queue": "maintenance"},
@@ -128,6 +129,14 @@ celery_app.conf.update(
             "task": "quantdinger.tasks.tradingview_verify",
             "schedule": max(
                 3600, int(os.getenv("TRADINGVIEW_VERIFY_INTERVAL_SEC", "86400"))
+            ),
+        },
+        # Candle-store retention. Off unless the layer is on, because a
+        # deployment that never enabled it has no rows to trim.
+        "prune-market-candles": {
+            "task": "quantdinger.tasks.prune_market_candles",
+            "schedule": max(
+                3600, int(os.getenv("MARKET_DATA_PRUNE_INTERVAL_SEC", "86400"))
             ),
         },
     },

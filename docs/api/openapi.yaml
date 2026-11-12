@@ -9573,4 +9573,98 @@ paths:
       - TradingView
       operationId: postApiTradingviewBacktest
       x-visibility: internal
+  /api/market-data/candles:
+    get:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      summary: Return bars for a range, fetching what is not stored.
+      description: 'Accepts either an explicit ``start``/``end`` (unix seconds) or
+        a ``limit``
+
+        meaning "the newest N bars". The response carries the same bar shape the
+
+        chart already consumes plus a ``source`` field reporting whether the answer
+
+        came from storage, upstream, or both, which is what makes the layer
+
+        observable while it is being rolled out.'
+      tags:
+      - Market
+      operationId: getApiMarketDataCandles
+      x-visibility: public
+  /api/market-data/coverage:
+    get:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      summary: Report which ranges are already stored for a stream.
+      tags:
+      - Market
+      operationId: getApiMarketDataCoverage
+      x-visibility: public
+  /api/market-data/prefetch:
+    post:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      summary: Warm a range without returning its bars.
+      description: 'Used before a backtest: the caller wants the data resident and
+        does not want
+
+        to carry a year of bars through the response.'
+      tags:
+      - Market
+      operationId: postApiMarketDataPrefetch
+      x-visibility: public
+  /api/market-data/status:
+    get:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      summary: Storage size and per-market coverage, for operators.
+      tags:
+      - Market
+      operationId: getApiMarketDataStatus
+      x-visibility: public
 openapi: 3.0.3
