@@ -632,7 +632,13 @@ def _candidate_rows(limit: int, *, min_score: int) -> List[Dict[str, Any]]:
     with get_db_connection() as db:
         cur = db.cursor()
         try:
-            # Skip rows already converted (or already failed for this version).
+            # Skip rows already converted, and skip rows that already failed at
+            # this transpiler version. A transpile failure is a property of the
+            # script and the generator: `no_strategy_entry` or `matrix_unsupported`
+            # will fail identically however many nights in a row it is retried, so
+            # retrying it on every pass would spend the batch budget on rows whose
+            # answer is already known. The version guard is what makes a fix
+            # reachable — bumping TRANSPILER_VERSION re-opens every one of them.
             cur.execute(
                 """
                 SELECT s.id, s.script_id_part, s.name, s.author, s.source_code,
@@ -644,8 +650,8 @@ def _candidate_rows(limit: int, *, min_score: int) -> List[Dict[str, Any]]:
                    AND s.source_code <> ''
                    AND s.migratability_score >= ?
                    AND (c.id IS NULL
-                        OR c.status IN ('pending', 'transpile_failed', 'compile_failed')
-                        OR c.transpiler_version <> ?)
+                        OR c.transpiler_version <> ?
+                        OR c.status = 'pending')
                  ORDER BY s.migratability_score DESC, s.likes_count DESC, s.id ASC
                  LIMIT ?
                 """,

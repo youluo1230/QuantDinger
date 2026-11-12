@@ -1542,3 +1542,24 @@ def test_a_strategy_that_stops_backtesting_is_withdrawn(monkeypatch):
         item for item in cursor.executed if item[1] and "script_template" in str(item[0])
     ]
     assert delisted, f"a failed backtest must withdraw the listing; executed={cursor.executed}"
+
+
+def test_a_permanent_transpile_failure_is_not_retried_every_night(monkeypatch):
+    """A row that cannot convert must stop consuming the conversion budget.
+
+    Most transpile failures are structural: ``no_strategy_entry``,
+    ``matrix_unsupported``, ``polyline_unsupported``. They will fail the same way
+    on every pass, so retrying them unconditionally spends the batch on
+    questions that already have an answer. The version guard is what keeps them
+    reachable: a fix bumps TRANSPILER_VERSION and every one of them re-opens.
+    """
+    cursor = _install_db(monkeypatch, _candidate_handler([]))
+
+    pipeline_module._candidate_rows(10, min_score=0)
+
+    sql = cursor.queries("FROM qd_tv_scripts s")[0][0]
+    retryable = sql.split("OR c.transpiler_version")[1].split("ORDER BY")[0]
+    assert "transpile_failed" not in retryable, (
+        "a transpile failure must not be re-picked at the same transpiler version"
+    )
+    assert "'pending'" in retryable, "a pending row must still be picked up"
