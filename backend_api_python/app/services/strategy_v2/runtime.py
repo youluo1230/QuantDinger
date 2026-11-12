@@ -2188,6 +2188,16 @@ class StrategyV2BacktestRunner:
             "maxDrawdownTroughTime": max_drawdown_trough_time,
             "totalTrades": len(closed_trades),
             "totalExecutions": len(executions),
+            # A strategy that opens a position and holds it to the end of the
+            # window never closes a trade, so ``totalTrades`` alone reports zero
+            # evidence for a run that did trade. Report the positions still open
+            # at the end so a caller judging "did this strategy trade at all?"
+            # does not have to guess from the execution count.
+            "openPositions": sum(
+                1
+                for value in self.broker.portfolio.positions.values()
+                if abs(float(getattr(value, "amount", 0.0) or 0.0)) > 1e-12
+            ),
             "sampleCount": len(equity_curve),
             "equityCurve": equity_curve,
             "holdingSnapshots": list(self.broker.holding_snapshots),

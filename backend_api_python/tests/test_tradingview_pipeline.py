@@ -804,6 +804,67 @@ def test_a_backtest_that_never_trades_is_not_published(monkeypatch):
     assert published == [], "an untraded strategy must not reach the marketplace"
 
 
+def test_a_position_still_open_at_the_end_counts_as_evidence(monkeypatch):
+    """A run that opened a position and held it to the end did trade.
+
+    ``totalTrades`` counts closed trades, so a strategy that buys once and holds
+    reports zero. Judging evidence by that number alone parks a run that made
+    12.5% as "never traded", and the position it was still holding is exactly
+    the thing the backtest was supposed to exercise.
+    """
+    candidate = {
+        "script_id_part": "PUB;holder",
+        "source_id": 12,
+        "name": "holder",
+        "description": "",
+        "code": "def initialize(context):\n    pass\n",
+    }
+
+    def handler(query: str, params):
+        if "FROM qd_tv_conversions c" in query:
+            return [candidate]
+        return []
+
+    cursor = _install_db(monkeypatch, handler)
+    published: List[dict] = []
+
+    class _Backtest:
+        def run(self, **kwargs):
+            return 31, {
+                "totalTrades": 0,
+                "totalExecutions": 1,
+                "openPositions": 1,
+                "totalReturn": 12.5,
+                "sharpeRatio": 2.9,
+                "maxDrawdown": -4.0,
+            }
+
+    class _Community:
+        def publish_script_template_from_strategy(self, **kwargs):
+            published.append(kwargs)
+            return True, "success", {"indicator_id": 21}
+
+    monkeypatch.setattr("app.services.strategy_v2.StrategyV2BacktestService", _Backtest)
+    monkeypatch.setattr(
+        "app.services.strategy_v2.strategy_source_code_hash", lambda code: "h"
+    )
+    monkeypatch.setattr(
+        "app.services.community_service.get_community_service", lambda: _Community()
+    )
+
+    result = pipeline_module.backtest_and_publish(limit=1, user_id=1, min_score=0, publish=True)
+
+    # One entry is a real entry, but it is not yet a sample. The run must be
+    # parked as "traded too rarely", never as "never traded": the two need
+    # separate populations, because a later lookback change should requeue only
+    # the second.
+    assert result["published"] == 0
+    assert result["results"][0]["skipped"] == "too_few_trades"
+    assert published == []
+    parked = [item for item in cursor.executed if item[1] and item[1][0] == "too_few_trades"]
+    assert parked, "the row must be parked as too_few_trades, not as no_trades"
+
+
 def test_publishing_reuses_a_successful_run_instead_of_repeating_it(monkeypatch):
     """A row that already backtested must be publishable without a fresh run.
 

@@ -451,7 +451,18 @@ def _stored_run_result(run_id: int) -> Dict[str, Any]:
         try:
             cur.execute(
                 """
-                SELECT total_trades, total_return, sharpe_ratio, max_drawdown
+                SELECT total_trades,
+                       total_executions,
+                       total_return,
+                       sharpe_ratio,
+                       max_drawdown,
+                       (
+                           SELECT count(*)
+                             FROM jsonb_each(
+                                      coalesce((result_json::jsonb) -> 'positions', '{}'::jsonb)
+                                  ) AS position
+                            WHERE abs(coalesce((position.value ->> 'amount')::numeric, 0)) > 0
+                       ) AS open_positions
                   FROM qd_backtest_runs
                  WHERE id = ?
                 """,
@@ -462,6 +473,8 @@ def _stored_run_result(run_id: int) -> Dict[str, Any]:
             cur.close()
     return {
         "totalTrades": int(row.get("total_trades") or 0),
+        "totalExecutions": int(row.get("total_executions") or 0),
+        "openPositions": int(row.get("open_positions") or 0),
         "totalReturn": row.get("total_return"),
         "sharpeRatio": row.get("sharpe_ratio"),
         "maxDrawdown": row.get("max_drawdown"),
@@ -1393,7 +1406,15 @@ def backtest_and_publish(
                 )
                 continue
 
+        # ``totalTrades`` counts closed trades only. A strategy that opens a
+        # position and holds it to the end of the window never closes one, so
+        # judging evidence by that number alone marks a run that did trade as
+        # "never traded" and drops the strategy. Positions still open at the end
+        # plus realised executions are the honest measure of activity.
         trades = int(result.get("totalTrades") or 0)
+        executions = int(result.get("totalExecutions") or 0)
+        open_positions = int(result.get("openPositions") or 0)
+        activity = trades + open_positions
         summary = {
             "source_id": source_id,
             "script_id_part": row["script_id_part"],
@@ -1407,6 +1428,8 @@ def backtest_and_publish(
                 else None
             ),
             "totalTrades": trades,
+            "totalExecutions": executions,
+            "openPositions": open_positions,
             "totalReturn": result.get("totalReturn"),
             "sharpeRatio": result.get("sharpeRatio"),
             "maxDrawdown": result.get("maxDrawdown"),
@@ -1416,7 +1439,15 @@ def backtest_and_publish(
         # the translated strategy at all: the entry condition simply never held.
         # Publishing that to the marketplace would advertise an unverified
         # strategy as if it had passed, so require real evidence of trading.
-        if trades < MIN_PUBLISH_TRADES:
+        #
+        # Evidence of trading and a sample worth trusting are two different
+        # questions and must not share one number. ``totalTrades`` only counts
+        # closed trades, so a strategy that buys once and holds to the end of
+        # the window reports zero while ``positions`` still holds it; adding the
+        # open position back answers the first question. The minimum-trade floor
+        # answers the second, and a position still open counts once because it
+        # is one entry, not because its size matters.
+        if activity < 1:
             summary["skipped"] = "no_trades"
             summary["minTrades"] = MIN_PUBLISH_TRADES
             results.append(summary)
@@ -1424,12 +1455,40 @@ def backtest_and_publish(
                 row["script_id_part"],
                 status="no_trades",
                 backtest_run_id=run_id,
-                diagnostics={"totalTrades": trades, "minTrades": MIN_PUBLISH_TRADES},
+                diagnostics={
+                    "totalTrades": trades,
+                    "openPositions": open_positions,
+                    "minTrades": MIN_PUBLISH_TRADES,
+                },
             )
             _delist_rejected_templates(
                 user_id,
                 source_id,
                 reason="Backtest no longer trades",
+            )
+            continue
+
+        if trades < MIN_PUBLISH_TRADES:
+            # It traded, but not often enough for the result to mean anything.
+            # Kept distinct from ``no_trades`` so a later lookback change can
+            # requeue exactly this population instead of the whole corpus.
+            summary["skipped"] = "too_few_trades"
+            summary["minTrades"] = MIN_PUBLISH_TRADES
+            results.append(summary)
+            _set_conversion_status(
+                row["script_id_part"],
+                status="too_few_trades",
+                backtest_run_id=run_id,
+                diagnostics={
+                    "totalTrades": trades,
+                    "openPositions": open_positions,
+                    "minTrades": MIN_PUBLISH_TRADES,
+                },
+            )
+            _delist_rejected_templates(
+                user_id,
+                source_id,
+                reason="Backtest trades too rarely",
             )
             continue
 

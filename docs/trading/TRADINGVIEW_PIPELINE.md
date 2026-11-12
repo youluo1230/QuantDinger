@@ -107,6 +107,17 @@ See `.env.example` for the full variable list. The important ones:
   `backtest_failed` so one broken script cannot consume a slot on every batch.
   Both states keep the row out of later batches; set it back to `ready` to retry
   after fixing the transpiler.
+- **Trading once is not a sample.** `total_trades` counts closed trades, so a
+  strategy that opens a position and holds it to the end of the window reports
+  zero while still holding it. The engine therefore reports `openPositions`
+  alongside, and a run with one open position and no closed trades has
+  demonstrably traded — it is parked as `too_few_trades`, never as `no_trades`.
+  The two states are deliberately separate: `no_trades` means the entry logic
+  never fired and points at the transpiler, `too_few_trades` means it fired but
+  the window was too quiet to measure anything, and a later lookback change
+  should requeue exactly the second population. The trade floor itself is
+  `TRADINGVIEW_MIN_TRADES`; it answers "is this sample worth trusting", not
+  "did this strategy do anything".
 - **A finished backtest is not an endorsement.** Publishing is the marketplace's
   only quality signal — there is no editorial layer behind it — so the publish
   step applies floors to the measured result: `TRADINGVIEW_MIN_RETURN_PCT`
