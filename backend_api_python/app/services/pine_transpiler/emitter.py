@@ -120,6 +120,8 @@ class Emitter:
             "uses_request_security": False,
             "has_strategy_entry": False,
             "has_strategy_close": False,
+            "has_signal_entry": False,
+            "signal_calls": 0,
             "uses_short": False,
             "emitted_statements": 0,
         }
@@ -127,6 +129,8 @@ class Emitter:
         self.extra_frequencies: list[str] = []
         #: Entry style detected in the Pine source.
         self.entry_style = "none"
+        #: Whether drawing/alert conditions may be lowered into orders.
+        self.signal_orders_enabled = True
         #: Translated Pine user functions, in source order.
         self.function_blocks: list[list[str]] = []
         #: Name of the Pine function currently being translated, if any.
@@ -153,13 +157,18 @@ class Emitter:
     def emit(self, tree: Any) -> dict[str, Any]:
         """Translate ``tree`` and return the pieces of the generated strategy."""
         script_body = list(getattr(tree, "body", []) or [])
+        # A real strategy already states its own entries and usually also plots
+        # the very same conditions for the chart. Lowering those plots into
+        # orders as well would place every trade twice, so signal lowering is
+        # only enabled for scripts that never call ``strategy.entry``.
+        self.signal_orders_enabled = not self._script_places_orders(tree)
         self._collect_declarations(script_body)
         self._predeclare_state(script_body)
         self._build_predeclarations()
         # Functions are translated first so calls resolve to real definitions.
         self._emit_user_functions(script_body)
         statements = self._emit_block(script_body, depth=1, top_level=True)
-        if not self.stats["has_strategy_entry"]:
+        if not self.stats["has_strategy_entry"] and not self.stats["has_signal_entry"]:
             self.blockers.append("no_strategy_entry")
         if self.entry_style == "none":
             self.blockers.append("no_entry_signal")
@@ -563,6 +572,12 @@ class Emitter:
         self._check_blocked(dotted_name)
         if not owner and name in mapping.DECLARATION_CALLS:
             return []
+        if name in mapping.SIGNAL_CALLS and self.signal_orders_enabled:
+            # An indicator has no ``strategy.*`` namespace, so its only per-bar
+            # condition is the one inside a drawing or alert call. That condition
+            # has to become the order, otherwise every indicator is "no entry
+            # signal" and can never be backtested.
+            return self._emit_signal_statement(name, node, indent)
         if owner in mapping.DROPPED_NAMESPACES or name in mapping.DROPPED_NAMESPACES:
             # Display calls are dropped, but their arguments may still have
             # side effects (``line.delete(array.shift(lines))``); keep those.
@@ -644,6 +659,87 @@ class Emitter:
             )
         self.entry_style = "signal"
         return f"{indent}order_target_percent(_SYMBOL, 1.0, reason=\"pine_long\")"
+
+    def _emit_signal_statement(self, name: str, node: Any, indent: str) -> list[str]:
+        """Turn an indicator's drawing or alert condition into an order.
+
+        A Pine indicator never calls ``strategy.entry``: its only executable
+        statements are drawings and alerts, and the condition inside one of them
+        is exactly the bar the author wanted to act on. Without this lowering
+        every indicator ends up "no entry signal" and can never be backtested.
+
+        The direction is not structural in Pine, so it is read from the title the
+        author wrote ("Bullish order block formed", "CHoCH Bear"). A condition
+        with no recognisable direction is treated as a long trigger, which is the
+        common case and keeps the script tradeable instead of silently inert.
+        """
+        positional = self._positional(node)
+        if not positional:
+            self._warn_once(f"signal_without_condition:{name}")
+            return []
+        condition = self._expr(positional[0])
+        if not condition:
+            self._warn_once(f"signal_without_condition:{name}")
+            return []
+        title = self._signal_title(node)
+        long_side = self._signal_is_long(title)
+        self.stats["has_signal_entry"] = True
+        self.stats["signal_calls"] = int(self.stats["signal_calls"]) + 1
+        self.entry_style = "signal"
+        target = "1.0" if long_side else "-1.0"
+        reason = "pine_signal_long" if long_side else "pine_signal_short"
+        if not long_side:
+            self.stats["uses_short"] = True
+            self._warn_once("short_as_target_percent")
+        return [
+            f"{indent}if {self._wrap_condition(condition)}:",
+            f"{indent}    order_target_percent(_SYMBOL, {target}, reason=\"{reason}\")",
+        ]
+
+    def _script_places_orders(self, tree: Any) -> bool:
+        """Report whether the script already enters trades through ``strategy.*``.
+
+        The parser's root node carries no line number, so ``walk`` skips it and
+        the statements have to be walked one by one.
+        """
+        stack = list(getattr(tree, "body", []) or [])
+        while stack:
+            node = stack.pop()
+            if node_name(node) == "Call":
+                parts = self._call_parts(node)
+                if parts is not None:
+                    name, owner = parts
+                    if owner == "strategy" and name in mapping.STRATEGY_ENTRY_CALLS:
+                        return True
+            stack.extend(children(node))
+        return False
+
+    def _signal_title(self, node: Any) -> str:
+        """Read the display title of a drawing or alert call."""
+        arguments = self._call_arguments(node)
+        for key in ("title",):
+            source = arguments.get(key)
+            if source is not None:
+                literal = self._literal_value(source)
+                if isinstance(literal, str):
+                    return literal
+        positional = self._positional(node)
+        # ``plotshape``/``plotchar``/``alertcondition`` all take the title as the
+        # second positional argument.
+        if len(positional) > 1:
+            literal = self._literal_value(positional[1])
+            if isinstance(literal, str):
+                return literal
+        return ""
+
+    def _signal_is_long(self, title: str) -> bool:
+        """Decide the trade side a signal title describes."""
+        lowered = str(title or "").lower()
+        short_hit = any(word in lowered for word in mapping.SHORT_SIGNAL_WORDS)
+        long_hit = any(word in lowered for word in mapping.LONG_SIGNAL_WORDS)
+        if short_hit and not long_hit:
+            return False
+        return True
 
     def _emit_assign(self, node: Any, indent: str, depth: int, *, top_level: bool) -> list[str]:
         """Translate a Pine declaration or destructuring assignment."""

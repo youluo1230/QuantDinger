@@ -171,17 +171,25 @@ def tradingview_harvest_now():
     Bounded by ``max_pages``/``max_sources`` so an interactive request cannot
     run for minutes; the scheduled Celery task has no such bound.
     """
-    from app.services.tradingview_harvest import harvest
+    from app.services.tradingview_harvest import SCRIPT_TYPES, harvest
 
     body = _payload()
     topics = body.get("topics")
     topic_list = [str(item) for item in topics if str(item).strip()] if isinstance(topics, list) else None
     try:
+        raw_types = body.get("script_types")
+        if isinstance(raw_types, str):
+            raw_types = [item.strip() for item in raw_types.split(",")]
+        script_types = [
+            item for item in (raw_types or [])
+            if isinstance(item, str) and item in SCRIPT_TYPES
+        ] or ["strategies"]
         result = harvest(
             trigger="api",
             topics=topic_list,
             max_pages=_int_arg(body.get("max_pages"), 2, maximum=10),
             max_sources=_int_arg(body.get("max_sources"), 20, minimum=0, maximum=200),
+            script_types=script_types,
         )
     except Exception as exc:
         logger.exception("TradingView harvest endpoint failed")

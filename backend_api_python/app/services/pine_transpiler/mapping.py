@@ -589,6 +589,24 @@ DROPPED_NAMESPACES: Final[tuple[str, ...]] = (
     "runtime",
 )
 
+#: Drawing calls whose first argument is a per-bar condition. An indicator has
+#: no ``strategy.*`` namespace, so these conditions are the only thing it can be
+#: traded on; ``SIGNAL_CALLS`` marks the ones the emitter turns into orders.
+SIGNAL_CALLS: Final[frozenset[str]] = frozenset(
+    {"plotshape", "plotchar", "alertcondition"}
+)
+
+#: Words in a signal title that mark it as a long or a short trigger. TradingView
+#: authors label alert conditions ("Bullish order block formed", "CHoCH Bear")
+#: rather than marking them structurally, so the title is the only direction
+#: information the source carries.
+LONG_SIGNAL_WORDS: Final[tuple[str, ...]] = (
+    "bull", "long", "buy", "up", "support", "demand", "ascending", "green",
+)
+SHORT_SIGNAL_WORDS: Final[tuple[str, ...]] = (
+    "bear", "short", "sell", "down", "resistance", "supply", "descending", "red",
+)
+
 #: ``strategy.*`` calls that place, flip, or flatten a position.
 STRATEGY_ENTRY_CALLS: Final[frozenset[str]] = frozenset({"entry", "order", "long", "short"})
 STRATEGY_CLOSE_CALLS: Final[frozenset[str]] = frozenset({"close", "close_all", "cancel", "cancel_all"})

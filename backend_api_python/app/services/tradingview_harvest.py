@@ -27,7 +27,7 @@ import os
 import re
 import threading
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Final, Iterable, List, Optional, Tuple
 from urllib.parse import quote
 
 import requests
@@ -102,12 +102,21 @@ def _json_get(session: requests.Session, url: str, **kwargs: Any) -> Any:
     return response.json()
 
 
-def _listing_url(topic: str, page: int) -> str:
+#: Script categories the harvester can pull. TradingView separates published
+#: strategies from published indicators, and the two are not interchangeable:
+#: a strategy states its own entries, while an indicator only draws signals that
+#: the transpiler has to lower into orders. Indicators outnumber strategies
+#: heavily on subjects such as ICT or order blocks, where strategies are scarce.
+SCRIPT_TYPES: Final[tuple[str, ...]] = ("strategies", "indicators")
+
+
+def _listing_url(topic: str, page: int, script_type: str = "strategies") -> str:
     topic_slug = quote(topic.strip().lower() or "trend", safe="")
+    category = script_type if script_type in SCRIPT_TYPES else "strategies"
     parts = [f"{TV_WEB_BASE}/scripts/{topic_slug}/"]
     if page > 1:
         parts.append(f"page-{page}/")
-    query = "component-data-only=1&script_type=strategies&script_access=open"
+    query = f"component-data-only=1&script_type={category}&script_access=open"
     return "".join(parts) + "?" + query
 
 
@@ -209,10 +218,11 @@ def fetch_listing(
     *,
     page: int = 1,
     session: Optional[requests.Session] = None,
+    script_type: str = "strategies",
 ) -> Tuple[List[Dict[str, Any]], int]:
     """Read one listing page. Returns (rows, upstream total count)."""
     client = session or _session()
-    payload = _json_get(client, _listing_url(topic, page))
+    payload = _json_get(client, _listing_url(topic, page, script_type))
     ideas = (payload or {}).get("data", {}).get("ideas", {}) or {}
     data = ideas.get("data") or {}
     items = data.get("items")
@@ -475,17 +485,25 @@ def harvest(
     topics: Optional[Iterable[str]] = None,
     max_pages: Optional[int] = None,
     max_sources: Optional[int] = None,
+    script_types: Optional[Iterable[str]] = None,
 ) -> Dict[str, Any]:
     """Run one full harvest: discover from listings, then fetch Pine sources.
 
     ``max_pages`` and ``max_sources`` bound the network budget so a scheduled
-    run stays well inside the Celery soft time limit.
+    run stays well inside the Celery soft time limit. ``script_types`` selects the
+    TradingView categories to pull: strategies carry their own entries, while
+    indicators only draw signals, which the transpiler recovers from their
+    drawing and alert conditions.
     """
     if not _harvest_lock.acquire(blocking=False):
         logger.info("TradingView harvest already running; skipping this trigger")
         return {"skipped": True, "reason": "already_running"}
     try:
         topic_list = [t for t in (topics or DEFAULT_TOPICS) if str(t).strip()]
+        categories = [
+            item for item in (script_types or ("strategies",))
+            if item in SCRIPT_TYPES
+        ] or ["strategies"]
         page_budget = max(1, int(max_pages if max_pages is not None else _DEFAULT_MAX_PAGES))
         source_budget = max(0, int(max_sources if max_sources is not None else _DEFAULT_MAX_SOURCES))
         run_id = _claim_run(trigger, topic_list)
@@ -498,25 +516,34 @@ def harvest(
 
         session = _session()
         try:
-            for topic in topic_list:
-                for page in range(1, page_budget + 1):
-                    try:
-                        rows, _total = fetch_listing(topic, page=page, session=session)
-                    except Exception as exc:
-                        topic_errors[topic] = str(exc)
-                        logger.warning("TradingView listing failed for %s page %s: %s", topic, page, exc)
-                        break
-                    if not rows:
-                        break
-                    discovered += len(rows)
-                    try:
-                        written += upsert_discovered(rows)
-                    except Exception:
-                        logger.exception("Could not persist TradingView listing rows for %s", topic)
-                    if len(rows) < _ITEMS_PER_PAGE:
-                        break
-                    if _REQUEST_PAUSE_SEC > 0:
-                        threading.Event().wait(_REQUEST_PAUSE_SEC)
+            for category in categories:
+                for topic in topic_list:
+                    for page in range(1, page_budget + 1):
+                        try:
+                            rows, _total = fetch_listing(
+                                topic, page=page, session=session, script_type=category
+                            )
+                        except Exception as exc:
+                            topic_errors[f"{category}:{topic}"] = str(exc)
+                            logger.warning(
+                                "TradingView listing failed for %s/%s page %s: %s",
+                                category, topic, page, exc,
+                            )
+                            break
+                        if not rows:
+                            break
+                        discovered += len(rows)
+                        try:
+                            written += upsert_discovered(rows)
+                        except Exception:
+                            logger.exception(
+                                "Could not persist TradingView listing rows for %s/%s",
+                                category, topic,
+                            )
+                        if len(rows) < _ITEMS_PER_PAGE:
+                            break
+                        if _REQUEST_PAUSE_SEC > 0:
+                            threading.Event().wait(_REQUEST_PAUSE_SEC)
 
             for target in pending_source_targets(source_budget):
                 result = fetch_source(target["script_id_part"], session=session)
@@ -543,6 +570,7 @@ def harvest(
         summary = {
             "trigger": trigger,
             "topics": topic_list,
+            "script_types": categories,
             "pages_per_topic": page_budget,
             "source_budget": source_budget,
             "discovered": discovered,

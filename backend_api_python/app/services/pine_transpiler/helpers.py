@@ -1291,6 +1291,14 @@ def _p_array_size(values):
 
 
 def _p_array_get(values, position):
+    """Pine ``array.get``; a slot read before its first write is empty.
+
+    ``var array<...>`` slots are predeclared with a neutral scalar and only
+    become lists once the script assigns an array to them. Every accessor has to
+    survive that state instead of calling ``len`` on a float.
+    """
+    if not isinstance(values, (list, tuple)):
+        return float("nan")
     index = int(position)
     if index < 0:
         index += len(values)
@@ -1300,6 +1308,8 @@ def _p_array_get(values, position):
 
 
 def _p_array_set(values, position, value):
+    if not isinstance(values, list):
+        return values
     index = int(position)
     if index < 0:
         index += len(values)
@@ -1309,6 +1319,8 @@ def _p_array_set(values, position, value):
 
 
 def _p_array_remove(values, position):
+    if not isinstance(values, list):
+        return values
     index = int(position)
     if 0 <= index < len(values):
         values.pop(index)
@@ -1316,27 +1328,35 @@ def _p_array_remove(values, position):
 
 
 def _p_array_push(values, value):
+    if not isinstance(values, list):
+        return values
     values.append(value)
     return values
 
 
 def _p_array_pop(values):
-    if not values:
+    if not isinstance(values, list) or not values:
         return float("nan")
     return values.pop()
 
 
 def _p_array_unshift(values, value):
+    if not isinstance(values, list):
+        return values
     values.insert(0, value)
     return values
 
 
 def _p_array_clear(values):
+    if not isinstance(values, list):
+        return values
     values.clear()
     return values
 
 
 def _p_array_index(values, value):
+    if not isinstance(values, (list, tuple)):
+        return -1
     for position, item in enumerate(values):
         if item == value:
             return position
@@ -1432,6 +1452,8 @@ def _p_array_range(values):
 
 
 def _p_array_stats(values, operation):
+    if not isinstance(values, (list, tuple)):
+        return float("nan")
     numbers = []
     for item in values:
         collapsed = _p_last(item)

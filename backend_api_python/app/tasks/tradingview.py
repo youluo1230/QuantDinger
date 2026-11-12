@@ -32,10 +32,18 @@ def run_tradingview_harvest(self):
         return {"skipped": True, "reason": "disabled"}
     from app.services.tradingview_harvest import harvest
 
+    # Indicators vastly outnumber strategies on subjects such as ICT and order
+    # blocks, so the scheduled run pulls both categories by default.
+    categories = [
+        item.strip()
+        for item in os.getenv("TRADINGVIEW_SCRIPT_TYPES", "strategies,indicators").split(",")
+        if item.strip()
+    ]
     return harvest(
         trigger="celery-beat",
         max_pages=max(1, int(os.getenv("TRADINGVIEW_HARVEST_MAX_PAGES", "3"))),
         max_sources=max(0, int(os.getenv("TRADINGVIEW_HARVEST_MAX_SOURCES", "60"))),
+        script_types=categories,
     )
 
 

@@ -49,7 +49,7 @@ MIGRATABILITY_VERSION = max(1, int(os.getenv("TRADINGVIEW_ASSESS_VERSION", "1"))
 # Version 6 translates onto the instrument TradingView published as well as the
 # interval, so earlier rows embed the wrong symbol and must be regenerated.
 # Version 5 was the interval change; both invalidate previously generated code.
-TRANSPILER_VERSION = max(1, int(os.getenv("TRADINGVIEW_TRANSPILER_VERSION", "9")))
+TRANSPILER_VERSION = max(1, int(os.getenv("TRADINGVIEW_TRANSPILER_VERSION", "10")))
 
 _DEFAULT_INSTRUMENT = os.getenv("TRADINGVIEW_DEFAULT_INSTRUMENT", "BTC/USDT")
 _DEFAULT_FREQUENCY = os.getenv("TRADINGVIEW_DEFAULT_FREQUENCY", "1h")
@@ -246,9 +246,16 @@ def _cheap_assessment(source: str) -> Dict[str, Any]:
         "map": lowered.count("map."),
     }
     has_strategy_entry = "strategy.entry" in lowered or "strategy.order" in lowered
+    # Indicators trade through the condition inside a drawing or alert call, so
+    # they must not be punished for lacking a ``strategy.entry`` they can never
+    # have.
+    has_signal_entry = any(
+        f"{call}(" in lowered
+        for call in ("plotshape", "plotchar", "alertcondition")
+    )
     blockers = [name for name, count in counts.items() if count and name in ("polyline",)]
     score = 100
-    if not has_strategy_entry:
+    if not has_strategy_entry and not has_signal_entry:
         score -= 45
     if counts["request"]:
         score -= 10

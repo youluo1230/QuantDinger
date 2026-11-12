@@ -36,6 +36,14 @@ _SIZE_HEAVY = 60_000
 _SIZE_LARGE = 25_000
 _SIZE_TINY = 400
 
+#: Calls that carry a per-bar condition an indicator can be traded on. A Pine
+#: indicator has no ``strategy.*`` namespace: its only executable statement is a
+#: drawing or alert call, and the condition inside one of these is exactly the
+#: signal a strategy would have acted on.
+_SIGNAL_CALLS: Final[frozenset[str]] = frozenset(
+    {"plotshape", "plotchar", "alertcondition"}
+)
+
 
 def assess_migratability(source: str) -> dict[str, Any]:
     """Score how likely a Pine Script source is to transpile automatically.
@@ -56,6 +64,8 @@ def assess_migratability(source: str) -> dict[str, Any]:
         "uses_table": False,
         "has_strategy_entry": False,
         "has_strategy_close": False,
+        "has_signal_entry": False,
+        "signal_calls": 0,
         "uses_short": False,
         "input_calls": 0,
         "display_calls": 0,
@@ -95,6 +105,14 @@ def assess_migratability(source: str) -> dict[str, Any]:
         re.search(r"strategy\.(close_all|close|exit)\s*\(", text)
     )
     stats["uses_short"] = "strategy.short" in text
+    # Indicators carry no ``strategy.*`` call at all. Their tradeable content is
+    # the condition behind each ``plotshape``/``alertcondition``: the runtime can
+    # only trade an indicator if one of those exists, so count them as the entry
+    # signal rather than rejecting the whole script. These calls are bare, so
+    # they are not part of ``calls`` (which only records ``ns.name(`` pairs).
+    bare_calls = _BARE_CALL_PATTERN.findall(text)
+    stats["signal_calls"] = sum(1 for name in bare_calls if name in _SIGNAL_CALLS)
+    stats["has_signal_entry"] = stats["signal_calls"] > 0
     stats["input_calls"] = sum(
         count for key, count in calls.items() if key.split(".", 1)[0] == "input"
     )
@@ -108,11 +126,11 @@ def assess_migratability(source: str) -> dict[str, Any]:
         if pattern in text:
             blockers.append(blocker)
 
-    if not stats["has_strategy_entry"]:
+    if not stats["has_strategy_entry"] and not stats["has_signal_entry"]:
         blockers.append("no_strategy_entry")
 
     score = 40
-    score += 20 if stats["has_strategy_entry"] else 0
+    score += 20 if (stats["has_strategy_entry"] or stats["has_signal_entry"]) else 0
     score += 10 if stats["has_strategy_close"] or stats["uses_short"] else 0
     score += 10 if stats["pine_version"] >= 5 else 4 if stats["pine_version"] == 4 else 0
     coverage = _ta_coverage(ta_calls)

@@ -77,6 +77,17 @@ def test_listing_url_normalises_topic():
     assert "/scripts/mean-reversion/" in harvest_module._listing_url(" Mean-Reversion ", 1)
 
 
+def test_listing_url_switches_the_script_type():
+    """Indicators carry signals the transpiler recovers; strategies state theirs."""
+    indicators = harvest_module._listing_url("ict", 1, "indicators")
+
+    assert "script_type=indicators" in indicators
+    assert "script_type=strategies" not in indicators
+    assert harvest_module._listing_url("ict", 1, "nonsense").endswith(
+        "script_type=strategies&script_access=open"
+    )
+
+
 def test_source_url_percent_encodes_script_id():
     """Script ids contain a ``;`` which must not break the path."""
     url = harvest_module._source_url("PUB;abc123")

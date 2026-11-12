@@ -913,3 +913,85 @@ if time > testPeriodStart
     ]
     assert positions == sorted(positions)
     assert hoisted
+
+
+def test_an_indicator_alert_condition_becomes_a_long_order():
+    """An indicator has no ``strategy.*`` call; its alert is the entry.
+
+    TradingView ships far more indicators than strategies, especially on
+    subjects such as ICT and order blocks. Without lowering the alert condition
+    into an order every indicator would be rejected as ``no_strategy_entry``.
+    """
+    source = """
+//@version=5
+indicator("Order blocks", overlay=true)
+bull = ta.crossover(close, ta.sma(close, 20))
+alertcondition(bull, "Bullish order block formed", "bull")
+"""
+
+    result = transpile_pine(source)
+
+    assert result.ok, result.blockers
+    assert 'order_target_percent(_SYMBOL, 1.0, reason="pine_signal_long")' in result.code
+    assert result.stats["has_signal_entry"] is True
+
+
+def test_an_indicator_bearish_alert_opens_a_short():
+    source = """
+//@version=5
+indicator("Bear", overlay=true)
+bear = ta.crossunder(close, ta.sma(close, 20))
+plotshape(bear, "Bearish breakdown", style=shape.triangledown, location=location.abovebar)
+"""
+
+    result = transpile_pine(source)
+
+    assert result.ok, result.blockers
+    assert 'order_target_percent(_SYMBOL, -1.0, reason="pine_signal_short")' in result.code
+
+
+def test_a_real_strategy_does_not_get_a_second_order_from_its_plots():
+    """A strategy usually plots the same condition it trades.
+
+    Lowering those plots into orders as well would enter every position twice.
+    """
+    source = """
+//@version=5
+strategy("Dual", overlay=true)
+buy = ta.crossover(close, ta.sma(close, 20))
+plotshape(buy, "Buy")
+if buy
+    strategy.entry("Long", strategy.long)
+"""
+
+    result = transpile_pine(source)
+
+    assert result.ok, result.blockers
+    orders = [
+        line for line in result.code.splitlines() if "order_target_percent" in line
+    ]
+    assert len(orders) == 1
+    assert result.stats["has_strategy_entry"] is True
+
+
+def test_array_accessors_survive_a_slot_that_is_still_a_scalar():
+    """``var array<box> x`` is predeclared with a scalar, not an empty list.
+
+    Every accessor used to call ``len`` on that placeholder, so a script that
+    read an array before its first write died with
+    ``object of type 'float' has no len()``.
+    """
+    from app.services.pine_transpiler import helpers
+
+    namespace: dict = {}
+    exec(helpers.ARRAY_SUPPORT, namespace)  # noqa: S102 - evaluating generated helpers
+
+    placeholder = float("nan")
+    assert namespace["_p_array_size"](placeholder) == 0
+    assert namespace["_p_array_get"](placeholder, 0) != namespace["_p_array_get"](placeholder, 0)
+    assert namespace["_p_array_index"](placeholder, 1.0) == -1
+    assert namespace["_p_array_pop"](placeholder) != namespace["_p_array_pop"](placeholder)
+    assert namespace["_p_array_push"](placeholder, 1.0) is placeholder
+    assert namespace["_p_array_stats"](placeholder, "avg") != namespace["_p_array_stats"](
+        placeholder, "avg"
+    )
