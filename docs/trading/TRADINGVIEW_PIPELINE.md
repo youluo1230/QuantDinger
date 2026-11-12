@@ -107,6 +107,12 @@ See `.env.example` for the full variable list. The important ones:
   `backtest_failed` so one broken script cannot consume a slot on every batch.
   Both states keep the row out of later batches; set it back to `ready` to retry
   after fixing the transpiler.
+- **A provider outage is not a verdict on the strategy.** When the data side
+  fails — no bars for the instrument, a rate limit, an unset provider key — the
+  generated code was never judged, so the row is parked as `no_data` rather
+  than `backtest_failed`. A later pass retries it, but behind every untried row:
+  the usual cause clears by itself, and a provider that is down for a night must
+  not consume the batch budget while other strategies wait.
 - **Trading once is not a sample.** `total_trades` counts closed trades, so a
   strategy that opens a position and holds it to the end of the window reports
   zero while still holding it. The engine therefore reports `openPositions`
