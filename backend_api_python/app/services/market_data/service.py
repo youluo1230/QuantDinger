@@ -295,7 +295,14 @@ class MarketDataService:
         if start % seconds:
             start += seconds - start % seconds
         end = int(end) - int(end) % seconds
-        last_closed = int(time.time()) // seconds * seconds
+        # ``now // seconds * seconds`` is the start of the bar that is *still
+        # forming*, not the last finished one, so anchoring on it asks for a bar
+        # the venue has not published yet. The sources compute an expected row
+        # count from the window and reject the whole answer below 98% coverage,
+        # so one missing trailing bar loses every bar in the answer — the read
+        # then looks like "this symbol has no data" while the venue has all of
+        # it. Step back one bar so the window ends on data that exists.
+        last_closed = (int(time.time()) // seconds - 1) * seconds
         if end > last_closed:
             end = last_closed
         if end < start:

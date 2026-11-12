@@ -328,4 +328,41 @@ def test_a_window_reaching_into_the_future_stops_at_the_last_closed_bar(monkeypa
 
     assert requested
     _after, before = requested[0]
-    assert before <= boundary + 3600, "must not ask for a bar that is still forming"
+    # ``boundary`` is where the bar that is still forming starts. The cutoff is
+    # exclusive, so it may sit exactly on that boundary but never past it.
+    assert before <= boundary, f"asked for a bar that is still forming: {before} > {boundary}"
+
+
+def test_the_window_never_ends_on_the_bar_that_is_still_forming(monkeypatch):
+    """The forming bar has no published OHLC yet, so asking for it costs the whole answer.
+
+    Sources derive an expected row count from the requested window and discard
+    anything below 98% coverage. Requesting the forming bar makes the venue come
+    back one row short, which fails that check for the *entire* window: the venue
+    answers "nothing here" while holding every bar but the last. That is how a
+    symbol with full history looks like an empty one.
+    """
+    repository = _Repository()
+    service = MarketDataService(repository=repository)
+    requested: List[tuple[int, int]] = []
+
+    def _get_kline(**kwargs):
+        requested.append((kwargs["after_time"], kwargs["before_time"]))
+        return []
+
+    monkeypatch.setattr(service_module.DataSourceFactory, "get_kline", staticmethod(_get_kline))
+
+    now = int(service_module.time.time())
+    seconds = 14400
+    forming = now // seconds * seconds
+    service.get_candles(
+        _stream(timeframe="4H"), start=forming - seconds * 48, end=forming + seconds * 48
+    )
+
+    assert requested
+    after, before = requested[0]
+    # The cutoff is exclusive, so it must land on the forming bar's start at the
+    # latest: the last bar in the answer then begins one interval before it.
+    assert before <= forming, f"cutoff {before} reaches into the forming bar at {forming}"
+    assert before - seconds == forming - seconds, "the last answered bar must be closed"
+    assert after < before
