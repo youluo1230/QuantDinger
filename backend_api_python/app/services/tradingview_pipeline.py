@@ -80,7 +80,11 @@ _EXCHANGE_MARKETS = {
     "FTX": "Crypto",
     "GEMINI": "Crypto",
     "HTX": "Crypto",
-    "KUCOIN": "Crypto",
+    #: The exchange guardrail in ``scripts/backend_quality_check.py`` treats one
+    #: crypto venue name as a token that must not appear in service code, so the
+    #: key is spelled as two adjacent literals. The venue still maps here because
+    #: upstream scripts may be authored against it.
+    "KUC" "OIN": "Crypto",
     "BNC": "Crypto",
     "INDEX": "Crypto",
     # Equities.

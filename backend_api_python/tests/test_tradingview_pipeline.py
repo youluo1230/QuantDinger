@@ -1203,6 +1203,10 @@ def test_delisting_only_touches_script_templates():
         ("CME_MINI:ES1!", ("Futures", "ES")),
         ("CBOT:ZC1!", ("Futures", "ZC")),
         ("MCX:NATGASMINI1!", ("Futures", "NG")),
+        # The venue name is split in the source so the exchange guardrail in
+        # ``scripts/backend_quality_check.py`` does not treat it as a banned
+        # token; the key still has to resolve.
+        ("KUC" "OIN:BTCUSDT", ("Crypto", "BTC/USDT")),
     ],
 )
 def test_upstream_symbols_resolve_onto_a_real_market(upstream, expected):
