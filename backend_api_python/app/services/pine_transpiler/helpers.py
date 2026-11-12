@@ -111,6 +111,16 @@ def _p_mask(condition):
     """Normalise a Pine boolean context to an elementwise mask."""
     if not hasattr(condition, "fillna"):
         return bool(condition)
+    # ``fillna(0).astype("bool")`` rebuilt the whole block through pandas'
+    # generic machinery: 42us per call on a 300-bar frame, and a translator that
+    # resolves a ternary per bar paid it millions of times. Going through numpy
+    # costs 10us for the same answer, and ``nan != 0`` keeps the incumbent
+    # reading of a missing condition as false.
+    try:
+        raw = condition.to_numpy(dtype="float64", na_value=0.0)
+        return pd.Series(np.nan_to_num(raw) != 0.0, index=condition.index, copy=False)
+    except (TypeError, ValueError):
+        pass
     filled = condition.fillna(0)
     try:
         return filled.astype("bool")
@@ -128,22 +138,23 @@ def _p_where(condition, when_true, when_false):
     mask = _p_mask(condition)
     true_series = hasattr(when_true, "fillna")
     false_series = hasattr(when_false, "fillna")
-    if not true_series or not false_series:
-        # At least one branch is a scalar, which is how translated table cells
-        # and ``var`` resets are built. Resolving those through an ``object``
-        # Series allocated three full-length arrays per call; a converted
-        # strategy that redraws a table every bar spent minutes there. ``np.where``
-        # keeps the dtype numeric and never materialises Python objects.
-        try:
-            left = when_true.to_numpy() if true_series else when_true
-            right = when_false.to_numpy() if false_series else when_false
-            if not isinstance(left, str) and not isinstance(right, str):
-                return pd.Series(
-                    np.where(mask.to_numpy(), left, right),
-                    index=condition.index,
-                )
-        except (TypeError, ValueError):
-            pass
+    # Resolve through numpy whenever both branches can be handed to ``np.where``
+    # as raw arrays. ``Series.mask`` copies the whole frame and re-enters pandas'
+    # block manager (94us on a 300-bar frame); ``np.where`` costs 10us and yields
+    # the same values. Strings and objects fall through to the mask path, which
+    # preserves their dtype semantics.
+    try:
+        left = when_true.to_numpy() if true_series else when_true
+        right = when_false.to_numpy() if false_series else when_false
+        if not isinstance(left, str) and not isinstance(right, str):
+            flags = mask.to_numpy() if hasattr(mask, "to_numpy") else bool(mask)
+            return pd.Series(
+                np.where(flags, left, right),
+                index=condition.index,
+                copy=False,
+            )
+    except (TypeError, ValueError):
+        pass
     if false_series and hasattr(when_false, "mask"):
         try:
             return when_false.copy().mask(mask, when_true)
@@ -666,7 +677,7 @@ def _p_vwma(series, length):
     return weighted / normalizer.replace(0.0, np.nan)
 '''
 
-_PRICE_STATS: Final[str] = '''def _p_stdev(series, length):
+_PRICE_STATS: Final[str] = """def _p_stdev(series, length):
     window = _p_window(length)
     return _p_as_series(series).rolling(window, min_periods=window).std(ddof=0)
 
@@ -820,9 +831,9 @@ def _p_pivotlow(series, leftbars, rightbars):
 
     pivots = series.rolling(span, min_periods=span).apply(_value, raw=True)
     return pivots.shift(-right).fillna(np.nan)
-'''
+"""
 
-_CROSSES: Final[str] = '''def _p_crossover(first, second):
+_CROSSES: Final[str] = """def _p_crossover(first, second):
     left = first if hasattr(first, "shift") else first
     right = second if hasattr(second, "shift") else second
     if not hasattr(left, "shift") or not hasattr(right, "shift"):
@@ -856,9 +867,9 @@ def _p_falling(series, length):
     if not hasattr(series, "shift"):
         return False
     return series < series.shift(_p_window(length))
-'''
+"""
 
-_VOLATILITY: Final[str] = '''def _p_true_range(high, low, close):
+_VOLATILITY: Final[str] = """def _p_true_range(high, low, close):
     previous = close.shift(1)
     ranges = pd.concat([(high - low), (high - previous).abs(), (low - previous).abs()], axis=1)
     return ranges.max(axis=1)
@@ -1001,7 +1012,7 @@ def _p_dmi(high, low, close, length, smoothing):
     spread = (plus_di + minus_di).replace(0.0, np.nan)
     dx = 100.0 * (plus_di - minus_di).abs() / spread
     return plus_di, minus_di, _p_rma(dx, smoothing)
-'''
+"""
 
 STATE_SUPPORT: Final[str] = '''def _state_get(key, fallback):
     """Read a persistent Pine ``var`` slot, initialising it on first use.
@@ -1178,28 +1189,54 @@ def _p_position_entry_bar():
     return float(_STATE.get("entry_bar", 0.0))
 
 
+# Running win/loss tally, keyed by how much of the append-only ledger has been
+# counted. Module level because the helper is re-emitted into every strategy and
+# has to survive across bars; a fresh run starts from an empty ledger, which the
+# shrinking-total guard in ``_p_trade_tally`` detects and resets.
+_TRADE_TALLY = {"seen": 0, "wins": 0.0, "losses": 0.0}
+
+
+def _p_trade_tally():
+    """Running win/loss counts, rebuilt only when the ledger grows.
+
+    Rescanning the whole ledger on every bar is quadratic: a strategy that checks
+    ``strategy.wintrades`` in its entry condition walks one more closed trade per
+    bar, so a month of one-minute bars with thousands of trades spends minutes in
+    ``dict.get``. The ledger is append-only, so the tally only has to inspect the
+    trades it has not seen yet.
+    """
+    trades = _p_closed_trades()
+    total = len(trades)
+    cache = _TRADE_TALLY
+    seen = cache.get("seen", 0)
+    wins = cache.get("wins", 0.0)
+    losses = cache.get("losses", 0.0)
+    if total < seen:
+        # A shorter ledger than last time means a new run: start over.
+        seen, wins, losses = 0, 0.0, 0.0
+    for index in range(seen, total):
+        try:
+            profit = float(trades[index].get("profit") or 0.0)
+        except (TypeError, ValueError, AttributeError, IndexError):
+            continue
+        if profit > 0.0:
+            wins += 1.0
+        elif profit < 0.0:
+            losses += 1.0
+    cache["seen"] = total
+    cache["wins"] = wins
+    cache["losses"] = losses
+    return wins, losses
+
+
 def _p_win_trade_count():
     """Closed trades that booked a profit."""
-    total = 0.0
-    for trade in _p_closed_trades():
-        try:
-            if float(trade.get("profit") or 0.0) > 0.0:
-                total += 1.0
-        except (TypeError, ValueError):
-            continue
-    return total
+    return _p_trade_tally()[0]
 
 
 def _p_loss_trade_count():
     """Closed trades that booked a loss."""
-    total = 0.0
-    for trade in _p_closed_trades():
-        try:
-            if float(trade.get("profit") or 0.0) < 0.0:
-                total += 1.0
-        except (TypeError, ValueError):
-            continue
-    return total
+    return _p_trade_tally()[1]
 
 
 def _p_closed_profit(index=0):
@@ -1489,25 +1526,78 @@ def _p_array_stats(values, operation):
 
 _GROUPS: Final[dict[str, tuple[str, ...]]] = {
     "prefix": (
-        "sma", "ema", "rma", "wma", "hma", "swma", "alma", "vwma",
+        "sma",
+        "ema",
+        "rma",
+        "wma",
+        "hma",
+        "swma",
+        "alma",
+        "vwma",
     ),
     "price_stats": (
-        "stdev", "variance", "correlation", "linreg", "cum", "change", "roc", "mom",
-        "highest", "lowest", "highestbars", "lowestbars", "barssince", "valuewhen",
-        "pivothigh", "pivotlow",
+        "stdev",
+        "variance",
+        "correlation",
+        "linreg",
+        "cum",
+        "change",
+        "roc",
+        "mom",
+        "highest",
+        "lowest",
+        "highestbars",
+        "lowestbars",
+        "barssince",
+        "valuewhen",
+        "pivothigh",
+        "pivotlow",
     ),
     "crosses": ("crossover", "crossunder", "cross", "rising", "falling"),
     "volatility": (
-        "tr", "true_range", "atr", "rsi", "stoch", "macd", "bollinger", "bb",
-        "bbw", "cci", "wpr", "mfi", "vwap", "supertrend", "percentrank", "dmi",
+        "tr",
+        "true_range",
+        "atr",
+        "rsi",
+        "stoch",
+        "macd",
+        "bollinger",
+        "bb",
+        "bbw",
+        "cci",
+        "wpr",
+        "mfi",
+        "vwap",
+        "supertrend",
+        "percentrank",
+        "dmi",
     ),
     "array": (
-        "array_new", "array_get", "array_set", "array_push", "array_pop",
-        "array_shift", "array_unshift", "array_clear", "array_remove",
-        "array_index", "array_lastindex", "array_includes", "array_stats",
-        "array_copy", "array_sort", "array_last", "array_from",
-        "array_median", "array_range", "array_reverse", "array_slice",
-        "array_join", "array_concat", "array_insert", "array_fill",
+        "array_new",
+        "array_get",
+        "array_set",
+        "array_push",
+        "array_pop",
+        "array_shift",
+        "array_unshift",
+        "array_clear",
+        "array_remove",
+        "array_index",
+        "array_lastindex",
+        "array_includes",
+        "array_stats",
+        "array_copy",
+        "array_sort",
+        "array_last",
+        "array_from",
+        "array_median",
+        "array_range",
+        "array_reverse",
+        "array_slice",
+        "array_join",
+        "array_concat",
+        "array_insert",
+        "array_fill",
     ),
     "runtime": RUNTIME_HELPER_NAMES,
     "state": (),
@@ -1523,9 +1613,7 @@ _GROUP_SOURCES: Final[dict[str, str]] = {
     "state": STATE_SUPPORT,
 }
 
-_HELPER_GROUP: Final[dict[str, str]] = {
-    name: group for group, names in _GROUPS.items() for name in names
-}
+_HELPER_GROUP: Final[dict[str, str]] = {name: group for group, names in _GROUPS.items() for name in names}
 
 
 #: Blocks every generated strategy needs, independent of the indicator mix.

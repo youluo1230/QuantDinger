@@ -87,8 +87,19 @@ def test_generated_source_respects_runtime_module_rules():
 def test_generated_source_avoids_sandbox_banned_builtins():
     """The strategy sandbox rejects these names before the code even imports."""
     banned = (
-        "getattr", "setattr", "dir", "globals", "vars", "breakpoint",
-        "importlib", "eval", "exec", "compile", "open", "chr", "format",
+        "getattr",
+        "setattr",
+        "dir",
+        "globals",
+        "vars",
+        "breakpoint",
+        "importlib",
+        "eval",
+        "exec",
+        "compile",
+        "open",
+        "chr",
+        "format",
     )
     result = transpile_pine(EMA_CROSS)
     assert result.ok, result.blockers
@@ -372,11 +383,7 @@ def _unbound_names(function: ast.FunctionDef) -> set[str]:
                 bound.add(alias.asname or alias.name.split(".")[0])
         elif isinstance(node, ast.arg):
             bound.add(node.arg)
-    loaded = {
-        node.id
-        for node in ast.walk(function)
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
-    }
+    loaded = {node.id for node in ast.walk(function) if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
     return loaded - bound - traced
 
 
@@ -415,9 +422,7 @@ else
     assert result.ok, result.blockers
 
     tree = ast.parse(result.code)
-    handler = next(
-        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "handle_data"
-    )
+    handler = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "handle_data")
     module_names = {node.name for node in tree.body if isinstance(node, ast.FunctionDef)}
 
     # Only the definitions that are actually nested inside the handler close over
@@ -634,9 +639,7 @@ if ta.crossover(close, ta.sma(close, 10)) and tracked > 0
         },
         index=pd.date_range("2026-01-01", periods=len(prices), freq="h"),
     )
-    output = StrategyV2BacktestRunner(
-        code=result.code, frames={"BTC/USDT": frame}, initial_capital=10000.0
-    ).run()
+    output = StrategyV2BacktestRunner(code=result.code, frames={"BTC/USDT": frame}, initial_capital=10000.0).run()
     assert output["finalEquity"] > 0.0
 
 
@@ -715,9 +718,7 @@ if bar_index == 0
     result = transpile_pine(source)
 
     assert result.ok, result.blockers
-    assert "totallyNotAPineBuiltin" in "".join(result.stats.get("unresolved") or []) or (
-        "float('nan')" in result.code
-    )
+    assert "totallyNotAPineBuiltin" in "".join(result.stats.get("unresolved") or []) or ("float('nan')" in result.code)
 
 
 def test_pine_v3_flat_series_calls_use_the_bar_series():
@@ -776,7 +777,7 @@ if bar_index == 0
     assert "_p_close_trade_count()" in result.code
     assert "_p_closed_profit(" in result.code
     assert "def _p_close_trade_count" in result.code
-    assert "_STATE.get(\"closed_trades\"" not in result.code
+    assert '_STATE.get("closed_trades"' not in result.code
 
 
 def test_bar_index_advances_past_the_warmup_window():
@@ -967,9 +968,7 @@ if buy
     result = transpile_pine(source)
 
     assert result.ok, result.blockers
-    orders = [
-        line for line in result.code.splitlines() if "order_target_percent" in line
-    ]
+    orders = [line for line in result.code.splitlines() if "order_target_percent" in line]
     assert len(orders) == 1
     assert result.stats["has_strategy_entry"] is True
 
@@ -992,9 +991,7 @@ def test_array_accessors_survive_a_slot_that_is_still_a_scalar():
     assert namespace["_p_array_index"](placeholder, 1.0) == -1
     assert namespace["_p_array_pop"](placeholder) != namespace["_p_array_pop"](placeholder)
     assert namespace["_p_array_push"](placeholder, 1.0) is placeholder
-    assert namespace["_p_array_stats"](placeholder, "avg") != namespace["_p_array_stats"](
-        placeholder, "avg"
-    )
+    assert namespace["_p_array_stats"](placeholder, "avg") != namespace["_p_array_stats"](placeholder, "avg")
 
 
 def test_a_constant_that_is_reassigned_stays_a_variable():
@@ -1037,3 +1034,90 @@ if buy
 
     assert result.ok, result.error
     assert "10" in result.code
+
+
+def _helper_namespace() -> dict:
+    """Evaluate the emitted helper source so it can be exercised directly."""
+    import types
+
+    import numpy as np
+    import pandas as pd
+
+    from app.services.pine_transpiler import helpers
+
+    namespace: dict = {"np": np, "pd": pd}
+    for block in (helpers.BASE_UTILS, helpers.RUNTIME_SUPPORT, helpers.ARRAY_SUPPORT):
+        exec(block, namespace)  # noqa: S102 - evaluating generated helpers
+    return namespace
+
+
+def test_ternaries_keep_their_elementwise_semantics():
+    """``_p_where`` must resolve per element, not collapse to one branch.
+
+    The rewrite that moved both-series resolution onto ``np.where`` is only
+    legitimate while it still selects element by element, keeps the index, and
+    reads a missing condition as false the way ``fillna(0)`` did.
+    """
+    import numpy as np
+    import pandas as pd
+
+    namespace = _helper_namespace()
+    where = namespace["_p_where"]
+
+    index = pd.date_range("2026-01-01", periods=6, freq="1min")
+    condition = pd.Series([1.0, 0.0, np.nan, 1.0, 0.0, 1.0], index=index)
+    when_true = pd.Series([10.0] * 6, index=index)
+    when_false = pd.Series([20.0] * 6, index=index)
+
+    resolved = where(condition, when_true, when_false)
+
+    assert resolved.index.equals(index)
+    assert list(resolved) == [10.0, 20.0, 20.0, 10.0, 20.0, 10.0]
+
+    mixed = where(condition, when_true, 0.0)
+    assert list(mixed) == [10.0, 0.0, 0.0, 10.0, 0.0, 10.0]
+
+
+def test_ternaries_still_return_strings_untouched():
+    """A string branch must not be pushed through ``np.where``."""
+    import pandas as pd
+
+    namespace = _helper_namespace()
+    where = namespace["_p_where"]
+
+    index = pd.date_range("2026-01-01", periods=3, freq="1min")
+    condition = pd.Series([1.0, 0.0, 1.0], index=index)
+    labels = pd.Series(["up", "up", "up"], index=index)
+
+    resolved = where(condition, labels, "flat")
+
+    assert list(resolved) == ["up", "flat", "up"]
+
+
+def test_win_loss_counts_survive_a_second_run():
+    """The incremental tally must reset when a new run starts.
+
+    ``_p_trade_tally`` caches how much of the ledger it has counted. A second
+    backtest begins with a shorter ledger, and the count has to restart rather
+    than continue from the previous run's totals.
+    """
+    namespace = _helper_namespace()
+
+    ledger: list[dict] = []
+
+    def get_closed_trades():
+        return list(ledger)
+
+    namespace["get_closed_trades"] = get_closed_trades
+    namespace["_p_closed_trades"] = lambda: get_closed_trades()
+    tally = namespace["_p_trade_tally"]
+
+    ledger.extend([{"profit": 5.0}, {"profit": -2.0}])
+    assert tally() == (1.0, 1.0)
+
+    ledger.append({"profit": 3.0})
+    assert tally() == (2.0, 1.0)
+
+    # A new run: the ledger shrinks back to one losing trade.
+    ledger[:] = [{"profit": -1.0}]
+    assert tally() == (0.0, 1.0)
