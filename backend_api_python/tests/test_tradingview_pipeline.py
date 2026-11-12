@@ -865,6 +865,33 @@ def test_a_position_still_open_at_the_end_counts_as_evidence(monkeypatch):
     assert parked, "the row must be parked as too_few_trades, not as no_trades"
 
 
+def test_a_pass_can_be_limited_to_chosen_sources(monkeypatch):
+    """A shard must only ever touch its own sources.
+
+    A backtest replays the whole window bar by bar, so a large corpus can only be
+    filled by running several processes at once. The guard against two workers
+    racing the same conversion row is the query itself, so the filter has to
+    reach the database rather than being applied after the fetch.
+    """
+    cursor = _install_db(monkeypatch, lambda query, params: [])
+
+    class _Backtest:
+        def run(self, **kwargs):
+            return 1, {"totalTrades": 5, "totalReturn": 1.0}
+
+    monkeypatch.setattr("app.services.strategy_v2.StrategyV2BacktestService", _Backtest)
+
+    pipeline_module.backtest_and_publish(
+        limit=4, user_id=1, min_score=0, publish=False, source_ids=[11, 12]
+    )
+
+    selects = cursor.queries("FROM qd_tv_conversions c")
+    assert selects, "the candidate query must run"
+    sql, params = selects[0]
+    assert "c.source_id = ANY" in sql
+    assert [11, 12] in list(params)
+
+
 def test_publishing_reuses_a_successful_run_instead_of_repeating_it(monkeypatch):
     """A row that already backtested must be publishable without a fresh run.
 

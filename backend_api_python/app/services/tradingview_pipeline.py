@@ -1299,6 +1299,7 @@ def backtest_and_publish(
     min_score: int = DEFAULT_MIN_SCORE,
     initial_capital: float = 10000.0,
     publish: bool = True,
+    source_ids: Optional[Sequence[int]] = None,
 ) -> Dict[str, Any]:
     """Backtest converted sources and publish the ones that clear the gate.
 
@@ -1306,6 +1307,12 @@ def backtest_and_publish(
     (``publish_script_template_from_strategy``), including the
     ``BACKTEST_REQUIRED`` precondition, so the automated and manual flows cannot
     diverge.
+
+    ``source_ids`` restricts the pass to a caller-chosen set of sources. A
+    backtest replays the whole window bar by bar and costs tens of seconds per
+    strategy, so the only practical way to fill a large corpus is to shard it
+    across processes; each shard must be disjoint because two workers racing the
+    same conversion row would backtest it twice and publish it twice.
     """
     from app.services.community_service import get_community_service
     from app.services.strategy_v2 import (
@@ -1328,10 +1335,17 @@ def backtest_and_publish(
                  WHERE c.status = ANY(?)
                    AND c.source_id IS NOT NULL
                    AND s.user_id = ?
+                   AND (?::int[] IS NULL OR c.source_id = ANY(?::int[]))
                  ORDER BY c.updated_at DESC
                  LIMIT ?
                 """,
-                (list(wanted), user_id, max(1, int(limit))),
+                (
+                    list(wanted),
+                    user_id,
+                    list(source_ids) if source_ids else None,
+                    list(source_ids) if source_ids else None,
+                    max(1, int(limit)),
+                ),
             )
             rows = [dict(row) for row in (cur.fetchall() or [])]
         finally:
