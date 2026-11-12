@@ -399,6 +399,16 @@ ON CONFLICT (script_id_part) DO UPDATE SET
     -- Regenerated code invalidates any earlier run: keeping the old id would let
     -- the publish pass reuse a result measured against different source.
     backtest_run_id = NULL,
+    -- A published row keeps its status at least until the new code is measured.
+    -- Resetting it to ``ready`` would take the listing off the queue's token
+    -- budget on every conversion pass even though nothing about the listing
+    -- changed; the publish pass re-runs it and either re-publishes or withdraws.
+    status = CASE
+                 WHEN qd_tv_conversions.status = 'published'
+                      AND qd_tv_conversions.code_hash = EXCLUDED.code_hash
+                 THEN 'published'
+                 ELSE EXCLUDED.status
+             END,
     updated_at = NOW()
 """
 

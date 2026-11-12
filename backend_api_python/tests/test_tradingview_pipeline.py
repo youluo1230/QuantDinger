@@ -865,6 +865,21 @@ def test_a_position_still_open_at_the_end_counts_as_evidence(monkeypatch):
     assert parked, "the row must be parked as too_few_trades, not as no_trades"
 
 
+def test_regenerating_unchanged_code_keeps_a_listing_published():
+    """A conversion pass must not silently take a live strategy off the market.
+
+    Regeneration runs whenever the transpiler version moves, and the generated
+    text only changes for the scripts the change affects. Resetting every row to
+    ``ready`` would make the publish pass reconsider every listing on every
+    upgrade, and a listing that had already cleared the gate would sit parked
+    until the queue came round to it again.
+    """
+    sql = pipeline_module._INSERT_CONVERSION_SQL
+
+    assert "qd_tv_conversions.status = 'published'" in sql
+    assert "qd_tv_conversions.code_hash = EXCLUDED.code_hash" in sql
+
+
 def test_a_pass_can_be_limited_to_chosen_sources(monkeypatch):
     """A shard must only ever touch its own sources.
 
