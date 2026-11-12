@@ -1121,3 +1121,45 @@ def test_win_loss_counts_survive_a_second_run():
     # A new run: the ledger shrinks back to one losing trade.
     ledger[:] = [{"profit": -1.0}]
     assert tally() == (0.0, 1.0)
+
+
+def test_timestamp_defaults_are_comparable_with_bar_time():
+    """A date-gated strategy must be able to reach its own entry condition.
+
+    Pine's ``timestamp()`` and ``time`` are compared directly, so they have to
+    share a unit and both have to be numbers. Two defects met here: the helper
+    returned microseconds while ``time`` is milliseconds, and it parsed the
+    ``"01-01-2023"`` form that TradingView writes in ``input.time`` defaults with
+    ``int()``, which returns NaN. A comparison against NaN is false on every bar,
+    so the strategy compiled, backtested, and never opened a position.
+    """
+    import numpy as np
+    import pandas as pd
+
+    from app.services.pine_transpiler import helpers
+
+    frame = pd.DataFrame(
+        {
+            "open": [1.0] * 4,
+            "high": [1.0] * 4,
+            "low": [1.0] * 4,
+            "close": [1.0] * 4,
+            "volume": [1.0] * 4,
+        },
+        index=pd.date_range("2026-11-01", periods=4, freq="h"),
+    )
+    namespace = {"np": np, "pd": pd}
+    exec(helpers.BASE_UTILS, namespace)  # noqa: S102 - the helpers are source text
+    namespace["_FRAME_REF"] = [frame]
+
+    bar_time = namespace["_p_time"]()
+    assert bar_time == frame.index[-1].value // 1_000_000
+
+    for literal in ("01-01-2023", "2023-01-01"):
+        stamp = namespace["_p_timestamp"](literal)
+        assert stamp == 1672531200000, f"{literal} must parse to a timestamp"
+        assert stamp < bar_time, "an older date must compare as before the bar"
+
+    calendar = namespace["_p_timestamp"](2026, 11, 1)
+    assert calendar <= bar_time
+    assert calendar == 1793491200000

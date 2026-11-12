@@ -300,13 +300,41 @@ def _p_session_flag(value):
 
 
 def _p_timestamp(*parts):
-    """Build a bar timestamp from calendar components, like Pine's timestamp()."""
+    """Build a bar timestamp in milliseconds, like Pine's timestamp().
+
+    Pine's ``timestamp()`` accepts calendar numbers *or* a date string, and every
+    consumer compares the result against ``time``. Two things have to line up for
+    that comparison to mean anything, and both were wrong here:
+
+    * the unit. ``time`` is exposed in milliseconds, so returning microseconds
+      made ``time >= timestamp(...)`` false on every bar, which silently turned
+      a date-gated strategy into one that never enters;
+    * the string form. ``timestamp("01-01-2023")`` is the shape TradingView
+      writes in an ``input.time`` default, and ``int()`` cannot parse it, so the
+      helper fell back to NaN — and a comparison against NaN is also always
+      false. Strategies gated that way never traded even when the unit was right.
+    """
     frame = _FRAME_REF[0]
     if frame is None:
         return float("nan")
     index = pd.DatetimeIndex(frame.index)
     if not parts:
         return int(index.asi8[-1] // 1000)
+    last = parts[0]
+    # A single string argument is a Pine date literal, not a calendar number.
+    if len(parts) == 1 and isinstance(_p_last(last), str):
+        text = str(_p_last(last)).strip()
+        for fmt in ("%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y", "%Y/%m/%d", "%d-%b-%Y"):
+            try:
+                stamp = pd.Timestamp(pd.to_datetime(text, format=fmt))
+            except (TypeError, ValueError):
+                continue
+            return int(stamp.timestamp() * 1000)
+        try:
+            stamp = pd.Timestamp(pd.to_datetime(text))
+        except (TypeError, ValueError):
+            return float("nan")
+        return int(stamp.timestamp() * 1000)
     try:
         numbers = [int(_p_last(part)) for part in parts]
     except (TypeError, ValueError):
@@ -320,7 +348,7 @@ def _p_timestamp(*parts):
         stamp = pd.Timestamp(year=year, month=month, day=day, hour=hour, minute=minute)
     except (TypeError, ValueError):
         return float("nan")
-    return int(stamp.timestamp() * 1000000)
+    return int(stamp.timestamp() * 1000)
 
 
 def _p_time(*parts):
