@@ -155,11 +155,11 @@ Each step is independently verifiable and leaves the system working.
       and falls back to its own path when it is off or cannot answer.
 - [x] Step 4: backtest integration (`load_strategy_frame` reads a fully
       covered window from the store and otherwise takes its own path).
-- [ ] Step 5: frontend unification. The chart still calls
-      `/api/indicator/kline`, which now routes through the layer, so the
-      browser is already served by it; the Charting Library datafeed in
-      `QuantDinger-Vue` still needs to point at `/api/market-data/candles`
-      directly before the legacy endpoint can be retired.
+- [x] Step 5: frontend unification. The Charting Library datafeed in
+      `QuantDinger-Vue` (`src/charting/datafeed.js`) calls
+      `/api/market-data/candles` directly, and `src/views/tv-workbench/` is the
+      page that mounts it. `/api/indicator/kline` still answers through the
+      layer for older callers, so it can be retired once nothing else uses it.
 - [x] Step 6: operations: `/api/market-data/status`, and the scheduled
       `prune_market_candles` task (`MARKET_DATA_RETENTION_DAYS`,
       `MARKET_DATA_AUDIT_RETENTION_DAYS`).
@@ -186,6 +186,17 @@ by testing against mocks, and both are now covered by regression tests:
   Passing the boundary itself silently drops the final bar; passing the one
   after requests a bar that is still forming, and the source then rejects the
   whole window instead of trimming it.
+
+A third defect came out of the same session and is worth recording because its
+symptom pointed the wrong way. The live-clock anchor was computed as
+`now // seconds * seconds`, which is where the bar **still being formed**
+starts, not where the last finished one does. Every live read therefore asked
+for one bar that had not been published, the venue came back one row short, and
+its 98% coverage check discarded the entire answer. A symbol with complete
+history reported "no data" while the venue held all but the last bar, and
+because the miss was deterministic it never healed on retry. The audit row said
+`empty`, which reads like an upstream gap rather than an off-by-one here. The
+anchor now steps back one bar; `Crypto SOL/USDT 4H` went from 0 bars to 47.
 
 ## Configuration
 
