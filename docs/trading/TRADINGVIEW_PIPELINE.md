@@ -13,11 +13,14 @@ same gates a hand-written strategy does — transpile, compile, backtest, publis
 The pipeline has four stages, each a separate service call, Celery task, and
 admin-only HTTP endpoint:
 
-1. **Harvest** — crawl public TradingView strategy listings, then fetch each
-   script's Pine source.
+1. **Harvest** — crawl public TradingView strategy and indicator listings,
+   then fetch each script's Pine source.
 2. **Assess** — score each fetched script for mechanical convertibility.
 3. **Convert** — transpile the best candidates into Strategy API V2 source and
-   refuse anything that does not compile.
+   refuse anything that does not compile. A strategy states its own entries; an
+   indicator has none, so its `plotshape`/`plotchar`/`alertcondition` condition
+   becomes the order. Direction is read from the title the author wrote, and a
+   condition with no recognisable wording stays long.
 4. **Backtest and publish** — run the converted strategy through the normal
    backtest service, then publish the result to the marketplace.
 
@@ -73,6 +76,7 @@ See `.env.example` for the full variable list. The important ones:
 | `TRADINGVIEW_HARVEST_ENABLED` | `false` | Master switch for all scheduled stages. |
 | `TRADINGVIEW_HARVEST_INTERVAL_SEC` | `86400` | Harvest cadence, clamped to a 3600s floor. |
 | `TRADINGVIEW_HARVEST_MAX_SOURCES` | `60` | Source fetches per run. |
+| `TRADINGVIEW_SCRIPT_TYPES` | `strategies,indicators` | Script categories to harvest. `strategies` state their own entries; `indicators` do not, so the transpiler trades them through the `plotshape`/`plotchar`/`alertcondition` conditions they draw. On subjects such as ICT or order blocks TradingView publishes an order of magnitude more indicators than strategies, so dropping `indicators` hides most of that supply. |
 | `TRADINGVIEW_MIN_SCORE` | `70` | Candidates below this are staged but never converted. |
 | `TRADINGVIEW_MIN_TRADES` | `3` | Minimum trades before a strategy may be listed. |
 | `TRADINGVIEW_TRANSPILER_VERSION` | `10` | Bump to regenerate sources after transpiler changes. Version 5 and 6 translate onto the interval and instrument upstream published, 7 and 8 fix the emitter and helper defects, 9 resolves drawing arrays and deferred input defaults, and 10 lets an indicator trade through its drawing and alert conditions. Anything generated earlier must be rebuilt. |
