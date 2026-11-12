@@ -391,7 +391,6 @@ ON CONFLICT (script_id_part) DO UPDATE SET
     source_id = COALESCE(EXCLUDED.source_id, qd_tv_conversions.source_id),
     transpiler = EXCLUDED.transpiler,
     transpiler_version = EXCLUDED.transpiler_version,
-    status = EXCLUDED.status,
     blockers = EXCLUDED.blockers,
     warnings = EXCLUDED.warnings,
     diagnostics = EXCLUDED.diagnostics,

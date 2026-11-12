@@ -878,6 +878,12 @@ def test_regenerating_unchanged_code_keeps_a_listing_published():
 
     assert "qd_tv_conversions.status = 'published'" in sql
     assert "qd_tv_conversions.code_hash = EXCLUDED.code_hash" in sql
+    # Postgres rejects an UPDATE that assigns a column twice, and the failure is
+    # raised at execute time, so a duplicate assignment here turns every single
+    # conversion write into a swallowed SyntaxError while the pass reports
+    # success. The CASE below is the only place that may set this column.
+    assert sql.count("status =") == 2, "the DO UPDATE clause must assign status exactly once"
+    assert sql.count("status = EXCLUDED.status") == 0
 
 
 def test_a_pass_can_be_limited_to_chosen_sources(monkeypatch):
