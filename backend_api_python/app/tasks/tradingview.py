@@ -92,7 +92,7 @@ def run_tradingview_convert(self):
     from app.services.tradingview_pipeline import convert_pending_scripts
 
     return convert_pending_scripts(
-        limit=max(1, int(os.getenv("TRADINGVIEW_CONVERT_BATCH", "8"))),
+        limit=max(1, int(os.getenv("TRADINGVIEW_CONVERT_BATCH", "120"))),
         user_id=int(os.getenv("TRADINGVIEW_CONVERT_USER_ID", "1")),
     )
 
@@ -121,7 +121,7 @@ def run_tradingview_verify(self):
     from app.services.tradingview_pipeline import backtest_and_publish
 
     return backtest_and_publish(
-        limit=max(1, int(os.getenv("TRADINGVIEW_VERIFY_BATCH", "3"))),
+        limit=max(1, int(os.getenv("TRADINGVIEW_VERIFY_BATCH", "10"))),
         user_id=int(os.getenv("TRADINGVIEW_CONVERT_USER_ID", "1")),
         publish=_enabled("TRADINGVIEW_AUTO_PUBLISH", default="true"),
     )
