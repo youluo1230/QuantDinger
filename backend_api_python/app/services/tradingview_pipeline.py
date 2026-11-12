@@ -1140,6 +1140,28 @@ _WINDOW_TOO_WIDE_MARKERS = (
 _RETRY_WINDOWS = (90, 60, 45, 30, 21, 14, 10, 7, 3)
 
 
+#: Markers for a failure the harness caused rather than the strategy. A data
+#: provider that is rate limited, missing a key, or simply has no bars for the
+#: instrument says nothing about the generated code, and the answer can change
+#: within minutes. Parking these next to a real defect would mean a provider
+#: that recovers still leaves the strategy parked until someone notices.
+_PROVIDER_FAILURE_MARKERS = (
+    "nomarketdata",
+    "insufficientwarmupdata",
+    "backtestrangelimit",
+    "no_market_data",
+    "max retries",
+    "ratelimit",
+    "too many requests",
+)
+
+
+def _provider_failure(exc: BaseException) -> bool:
+    """True when the failure came from the data side, not from the strategy."""
+    text = str(exc).lower()
+    return any(marker.lower() in text for marker in _PROVIDER_FAILURE_MARKERS)
+
+
 def _window_too_wide(exc: BaseException) -> bool:
     """True when retrying on a shorter window could succeed."""
     text = str(exc)
@@ -1340,7 +1362,11 @@ def backtest_and_publish(
             # ``backtested`` rows already hold a successful run, so a publish
             # pass must pick them up: re-running the backtest would waste minutes
             # and still never publish anything when only fresh rows are selected.
-            wanted = ("ready", "backtested") if publish else ("ready",)
+            # ``no_data`` rows are retried, but last: the strategy was never judged,
+            # so it must not be abandoned, and the usual cause clears by itself. It
+            # still sorts behind everything untried, because a batch that spent its
+            # whole budget on an unreachable provider would have learned nothing.
+            wanted = ("ready", "backtested", "no_data") if publish else ("ready",)
             cur.execute(
                 """
                 SELECT c.script_id_part, c.source_id, c.status, c.backtest_run_id,
@@ -1351,7 +1377,7 @@ def backtest_and_publish(
                    AND c.source_id IS NOT NULL
                    AND s.user_id = ?
                    AND (?::int[] IS NULL OR c.source_id = ANY(?::int[]))
-                 ORDER BY c.updated_at DESC
+                 ORDER BY (c.status = 'no_data'), c.updated_at DESC
                  LIMIT ?
                 """,
                 (
@@ -1421,9 +1447,20 @@ def backtest_and_publish(
                 # are retried forever, starving strategies that have never run. A
                 # timeout is parked separately because re-running it unchanged would
                 # burn the same minutes again.
+                #
+                # A provider failure is parked under its own status so the row can
+                # be re-armed without re-testing the code: the strategy was never
+                # given a chance to run, and the usual reason (a rate limit or a
+                # missing key) clears on its own.
+                if _provider_failure(exc):
+                    status = "no_data"
+                elif timed_out:
+                    status = "timeout"
+                else:
+                    status = "backtest_failed"
                 _set_conversion_status(
                     row["script_id_part"],
-                    status="timeout" if timed_out else "backtest_failed",
+                    status=status,
                     diagnostics={"error": str(exc)[:2000]},
                 )
                 # A strategy that no longer backtests must not stay advertised on

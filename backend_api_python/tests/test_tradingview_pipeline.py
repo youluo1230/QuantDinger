@@ -1563,3 +1563,31 @@ def test_a_permanent_transpile_failure_is_not_retried_every_night(monkeypatch):
         "a transpile failure must not be re-picked at the same transpiler version"
     )
     assert "'pending'" in retryable, "a pending row must still be picked up"
+
+
+def test_a_provider_outage_does_not_permanently_park_a_strategy(monkeypatch):
+    """A missing key or a rate limit must not be mistaken for a broken strategy.
+
+    ``noMarketData`` says the harness could not fetch bars, so the code was never
+    judged. Parking it as ``backtest_failed`` means a provider that recovers
+    tonight still leaves the strategy parked. It is parked as ``no_data``
+    instead, which the next pass retries — after everything untried, so an
+    unreachable provider cannot eat the whole batch.
+    """
+    errors = {
+        "strategyV2.noMarketData": True,
+        "strategyV2.runtimeFailed:handle_data:name 'x' is not defined": False,
+        "HTTPSConnectionPool: Max retries exceeded": True,
+        "YFRateLimitError('Too Many Requests')": True,
+    }
+    for message, expected in errors.items():
+        assert pipeline_module._provider_failure(Exception(message)) is expected, message
+
+
+def test_provider_failures_are_retried_behind_the_untried_rows():
+    """The retry order matters: unreachable data must not starve new strategies."""
+    sql = inspect.getsource(pipeline_module.backtest_and_publish)
+    assert '"no_data"' in sql, "provider failures must remain selectable"
+    assert "ORDER BY (c.status = 'no_data')" in sql, (
+        "no_data must sort behind untried rows, or an outage consumes the batch"
+    )
