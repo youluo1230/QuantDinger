@@ -49,7 +49,7 @@ MIGRATABILITY_VERSION = max(1, int(os.getenv("TRADINGVIEW_ASSESS_VERSION", "1"))
 # Version 6 translates onto the instrument TradingView published as well as the
 # interval, so earlier rows embed the wrong symbol and must be regenerated.
 # Version 5 was the interval change; both invalidate previously generated code.
-TRANSPILER_VERSION = max(1, int(os.getenv("TRADINGVIEW_TRANSPILER_VERSION", "10")))
+TRANSPILER_VERSION = max(1, int(os.getenv("TRADINGVIEW_TRANSPILER_VERSION", "11")))
 
 _DEFAULT_INSTRUMENT = os.getenv("TRADINGVIEW_DEFAULT_INSTRUMENT", "BTC/USDT")
 _DEFAULT_FREQUENCY = os.getenv("TRADINGVIEW_DEFAULT_FREQUENCY", "1h")

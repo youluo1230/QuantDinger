@@ -995,3 +995,45 @@ def test_array_accessors_survive_a_slot_that_is_still_a_scalar():
     assert namespace["_p_array_stats"](placeholder, "avg") != namespace["_p_array_stats"](
         placeholder, "avg"
     )
+
+
+def test_a_constant_that_is_reassigned_stays_a_variable():
+    """``x = false`` followed by ``x := true`` is a flag, not a constant.
+
+    Folding the initialiser into every read leaves the reassignment writing to a
+    name nothing reads, so ``if x`` tests the folded ``False`` forever and the
+    strategy never enters. The reassignment lives inside an ``if``, so the search
+    for it has to descend into nested blocks.
+    """
+    source = """//@version=5
+strategy("T")
+var int last_signal = 0
+buy_signal = false
+raw_buy = close > open
+if raw_buy and last_signal != 1
+    buy_signal := true
+    last_signal := 1
+if buy_signal
+    strategy.entry("Long", strategy.long)
+"""
+    result = transpile_pine(source, symbol="BTC/USDT", timeframe="1h", name="T")
+
+    assert result.ok, result.error
+    assert "if _p_truth(buy_signal):" in result.code
+    assert "if _p_truth(False):" not in result.code
+
+
+def test_an_untouched_constant_is_still_inlined():
+    """The inliner must keep working for names the script never reassigns."""
+    source = """//@version=5
+strategy("T")
+mult = 2.5
+threshold = 10
+buy = close > threshold
+if buy
+    strategy.entry("Long", strategy.long)
+"""
+    result = transpile_pine(source, symbol="BTC/USDT", timeframe="1h", name="T")
+
+    assert result.ok, result.error
+    assert "10" in result.code

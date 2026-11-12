@@ -229,6 +229,12 @@ class Emitter:
             self.user_types[type_name] = self._type_fields(node)
         # Inline pure script-level constants so nested functions and hoisted
         # parameters never depend on assignment order inside ``handle_data``.
+        # Only names the script never reassigns may be inlined: Pine's
+        # ``buy_signal = false`` followed by ``buy_signal := true`` inside a
+        # branch is a mutable flag, and folding it to ``False`` would leave the
+        # reassignment writing to a name the rest of the code never reads, so
+        # every ``if buy_signal`` would test the constant instead of the flag.
+        reassigned = self._reassigned_names(body)
         for node in body:
             if not is_node(node, "Assign"):
                 continue
@@ -242,8 +248,29 @@ class Emitter:
             if rendered is None:
                 continue
             name = str(getattr(target, "id", ""))
-            if name:
+            if name and name not in reassigned:
                 self.constants[name] = rendered
+
+    def _reassigned_names(self, body: list[Any]) -> set[str]:
+        """Return every name the script reassigns with ``:=`` anywhere.
+
+        The search has to cover nested blocks: ``buy_signal := true`` lives inside
+        an ``if``, and reading only the top-level statements would miss it.
+        """
+        names: set[str] = set()
+        stack: list[Any] = list(body)
+        while stack:
+            current = stack.pop()
+            if current is None:
+                continue
+            if is_node(current, "ReAssign"):
+                target = getattr(current, "target", None)
+                if is_node(target, "Name"):
+                    name = str(getattr(target, "id", "") or "")
+                    if name:
+                        names.add(name)
+            stack.extend(children(current))
+        return names
 
     def _emit_user_functions(self, body: list[Any]) -> None:
         """Translate Pine ``name(args) =>`` functions into Python helpers."""
