@@ -70,13 +70,40 @@ def _p_as_series(value):
 
 
 def _p_window(length):
-    return max(1, int(float(length)))
+    """Read a bar count, falling back to a single bar when it is ``na``.
+
+    ``int(nan)`` raises, and a script that passes an unset ``input`` or a
+    loop variable that never got a value would abort the backtest from inside a
+    helper it never mentioned.
+    """
+    try:
+        number = float(length)
+    except (TypeError, ValueError):
+        return 1
+    if number != number or number in (float("inf"), float("-inf")):
+        return 1
+    return max(1, int(number))
 
 
 def _p_shift(value, count):
-    """Shift a series by ``count`` bars, where positive counts look backwards."""
+    """Shift a series by ``count`` bars, where positive counts look backwards.
+
+    Pine indexes with an ``na`` offset are ``na``: ``close[length]`` where
+    ``length`` was never assigned gives a missing value, not an exception and not
+    the current bar. Scripts reach this by indexing an array slot that is still
+    empty and subtracting it from ``bar_index``, so converting the offset with
+    ``int()`` used to abort the whole backtest on the first such bar.
+    """
+    try:
+        offset = float(count)
+    except (TypeError, ValueError):
+        offset = float("nan")
+    if offset != offset or offset in (float("inf"), float("-inf")):
+        if hasattr(value, "shift"):
+            return pd.Series(np.full(len(value), np.nan), index=value.index)
+        return float("nan")
     if hasattr(value, "shift"):
-        return value.shift(int(float(count)))
+        return value.shift(int(offset))
     return value
 
 
@@ -180,11 +207,27 @@ def _p_isna(value=None):
 def _p_at(value, position):
     """Read one field of a Pine tuple result."""
     if isinstance(value, (tuple, list)):
-        index = int(position)
-        if 0 <= index < len(value):
+        index = _p_index(position)
+        if index is not None and 0 <= index < len(value):
             return value[index]
         return float("nan")
     return value
+
+
+def _p_index(value, default=None):
+    """Read a Pine index as an integer, treating ``na`` as "no element".
+
+    ``array.get(buf, na)`` and ``matrix.get(m, na, na)`` are legal Pine and
+    yield ``na``; ``int(nan)`` raises instead, which aborted whole backtests
+    from inside a helper the script never mentioned.
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if number != number or number in (float("inf"), float("-inf")):
+        return default
+    return int(number)
 
 
 def _p_nz(value, replacement=0.0):
@@ -217,13 +260,29 @@ def _p_time_series(frame):
         return pd.Series(range(len(index)), index=index, dtype="int64")
 
 
-def _p_matrix_new(size=0, fill=0.0):
-    """Minimal matrix stand-in: a list of rows, enough for generic calls."""
+def _p_matrix_new(rows=0, columns=None, fill=0.0):
+    """Minimal matrix stand-in: a list of rows, enough for generic calls.
+
+    Pine's ``matrix.new<float>(rows, columns, initial)`` takes three arguments,
+    and scripts that fill a matrix do call it that way. The one-argument form is
+    what the translator emits for a bare ``matrix.new<float>()``; it means an
+    empty matrix, and a single number there used to build a square matrix the
+    caller never asked for.
+    """
     try:
-        count = max(0, int(size))
+        row_count = max(0, int(rows))
     except (TypeError, ValueError):
-        count = 0
-    return [[fill for _ in range(count)] for _ in range(count)]
+        row_count = 0
+    if columns is None:
+        column_count = 0 if row_count == 0 else row_count
+    else:
+        try:
+            column_count = max(0, int(columns))
+        except (TypeError, ValueError):
+            column_count = 0
+    if row_count == 0 or column_count == 0:
+        return []
+    return [[fill for _ in range(column_count)] for _ in range(row_count)]
 
 
 def _p_map_new():
@@ -234,24 +293,30 @@ def _p_map_new():
 def _p_matrix_get(matrix, row, column=None):
     if not isinstance(matrix, (list, tuple)):
         return float("nan")
-    try:
-        target = matrix[int(float(row))]
-    except (IndexError, TypeError, ValueError):
+    row_index = _p_index(row)
+    if row_index is None or not -len(matrix) <= row_index < len(matrix):
         return float("nan")
+    target = matrix[row_index]
     if column is None:
         return target
-    try:
-        return target[int(float(column))]
-    except (IndexError, TypeError, ValueError):
+    column_index = _p_index(column)
+    if column_index is None or not isinstance(target, (list, tuple)):
         return float("nan")
+    if not -len(target) <= column_index < len(target):
+        return float("nan")
+    return target[column_index]
 
 
 def _p_matrix_set(matrix, row, column, value):
     if not isinstance(matrix, list):
         return value
+    row_index = _p_index(row)
+    column_index = _p_index(column)
+    if row_index is None or column_index is None:
+        return value
     try:
-        matrix[int(float(row))][int(float(column))] = value
-    except (IndexError, TypeError, ValueError):
+        matrix[row_index][column_index] = _p_last(value)
+    except (IndexError, TypeError):
         return value
     return value
 
@@ -270,19 +335,18 @@ def _p_matrix_row(matrix, index):
     """Pine ``matrix.row``: one row of the implied matrix."""
     if not isinstance(matrix, (list, tuple)):
         return []
-    try:
-        return list(matrix[int(float(index))])
-    except (IndexError, TypeError, ValueError):
+    position = _p_index(index)
+    if position is None or not -len(matrix) <= position < len(matrix):
         return []
+    return list(matrix[position])
 
 
 def _p_matrix_col(matrix, index):
     """Pine ``matrix.col``: one column, gathered across the rows."""
     if not isinstance(matrix, (list, tuple)):
         return []
-    try:
-        column = int(float(index))
-    except (TypeError, ValueError):
+    column = _p_index(index)
+    if column is None:
         return []
     output = []
     for row in matrix:
@@ -369,8 +433,9 @@ def _p_matrix_inverse(matrix):
 
 
 def _p_map_put(mapping, key, value):
+    """Store a map entry, collapsing a series to this bar."""
     if isinstance(mapping, dict):
-        mapping[key] = value
+        mapping[key] = _p_last(value)
     return value
 
 
@@ -1072,11 +1137,22 @@ def _p_rsi(series, length):
 
 
 def _p_stoch(close, high, low, length):
+    '''Pine ``ta.stoch(source, high, low, length)``.
+
+    Scripts in the wild call it with numeric arguments in the ``high`` and
+    ``low`` slots — ``ta.stoch(close, 14, 1, 3)`` — which reads as a length and
+    two smoothing constants. Binning them or widening every number into a
+    constant series would both produce a wrong channel, so a non-series band
+    substitutes the source series instead.
+    '''
+    source = _p_as_series(close)
     window = _p_window(length)
-    lowest = low.rolling(window, min_periods=window).min()
-    highest = high.rolling(window, min_periods=window).max()
+    upper = high if hasattr(high, "rolling") else source
+    lower = low if hasattr(low, "rolling") else source
+    lowest = _p_as_series(lower).rolling(window, min_periods=window).min()
+    highest = _p_as_series(upper).rolling(window, min_periods=window).max()
     span = (highest - lowest).replace(0.0, np.nan)
-    return 100.0 * (close - lowest) / span
+    return 100.0 * (source - lowest) / span
 
 
 def _p_macd(series, fast, slow, signal):
@@ -1701,7 +1777,9 @@ def _p_array_get(values, position):
     """
     if not isinstance(values, (list, tuple)):
         return float("nan")
-    index = int(position)
+    index = _p_index(position)
+    if index is None:
+        return float("nan")
     if index < 0:
         index += len(values)
     if index < 0 or index >= len(values):
@@ -1710,9 +1788,20 @@ def _p_array_get(values, position):
 
 
 def _p_array_set(values, position, value):
+    """Write one element of a Pine array.
+
+    An array element is a single value: ``array.set(buf, i, someSeries)`` stores
+    what that series read on the current bar, not the series itself. Keeping the
+    whole object made later reads depend on how long the frame happened to be
+    when the bar was stored, and comparing two such survivors raised
+    "Can only compare identically-labeled Series objects".
+    """
     if not isinstance(values, list):
         return values
-    index = int(position)
+    value = _p_last(value)
+    index = _p_index(position)
+    if index is None:
+        return values
     if index < 0:
         index += len(values)
     if 0 <= index < len(values):
@@ -1721,18 +1810,23 @@ def _p_array_set(values, position, value):
 
 
 def _p_array_remove(values, position):
+    """Remove one element; an ``na`` index removes nothing."""
     if not isinstance(values, list):
         return values
-    index = int(position)
-    if 0 <= index < len(values):
+    index = _p_index(position)
+    if index is not None and 0 <= index < len(values):
         values.pop(index)
     return values
 
 
 def _p_array_push(values, value):
+    """Append one element to a Pine array, collapsing a series to this bar.
+
+    Same reason as ``_p_array_set``: an element is a value, not a series.
+    """
     if not isinstance(values, list):
         return values
-    values.append(value)
+    values.append(_p_last(value))
     return values
 
 
@@ -1743,9 +1837,10 @@ def _p_array_pop(values):
 
 
 def _p_array_unshift(values, value):
+    """Prepend one element, collapsing a series to this bar."""
     if not isinstance(values, list):
         return values
-    values.insert(0, value)
+    values.insert(0, _p_last(value))
     return values
 
 

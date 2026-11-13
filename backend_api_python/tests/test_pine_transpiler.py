@@ -1613,3 +1613,68 @@ if close > v
         assert result.ok, (name, result.blockers)
         assert f"ta_unsupported:{name}" not in (result.warnings or []), name
         assert "_p_" in result.code, name
+
+
+def test_an_array_holds_the_bar_value_not_the_series():
+    """Pine array elements are values; a stored series breaks later compares.
+
+    ``array.set(buf, i, someSeries)`` stores what that series read on the bar,
+    not the series object. Keeping the object made a later ``high >= buf[i]``
+    compare two Series of different lengths and raise
+    "Can only compare identically-labeled Series objects".
+    """
+    namespace = _helper_namespace()
+    import numpy as np
+    import pandas as pd
+
+    frame = pd.Series(np.arange(10, dtype="float64"))
+    buffer = []
+
+    namespace["_p_array_push"](buffer, frame)
+    namespace["_p_array_set"](buffer, 0, frame)
+    namespace["_p_array_unshift"](buffer, frame)
+
+    assert all(not hasattr(item, "iloc") for item in buffer), buffer
+    # push appends, set overwrites the same slot, unshift prepends: two values.
+    assert [float(item) for item in buffer] == [9.0, 9.0], buffer
+
+
+def test_a_na_offset_reads_as_missing_instead_of_raising():
+    """``close[n]`` with ``n`` unset is ``na`` in Pine, not an exception."""
+    namespace = _helper_namespace()
+    import numpy as np
+    import pandas as pd
+
+    series = pd.Series(np.arange(5, dtype="float64"))
+    shifted = namespace["_p_shift"](series, float("nan"))
+
+    assert len(shifted) == len(series)
+    assert shifted.isna().all()
+
+    scalar = namespace["_p_shift"](7.0, float("nan"))
+    assert scalar != scalar  # NaN
+
+
+def test_an_na_length_does_not_abort_the_helper():
+    """``int(nan)`` inside a helper killed backtests the source never blamed."""
+    namespace = _helper_namespace()
+
+    assert namespace["_p_window"](float("nan")) == 1
+    assert namespace["_p_window"](None) == 1
+    assert namespace["_p_window"](7) == 7
+
+
+def test_a_stochastic_called_with_numeric_bands_still_produces_values():
+    """``ta.stoch(close, 14, 1, 3)`` passes numbers where bands are expected."""
+    namespace = _helper_namespace()
+    import numpy as np
+    import pandas as pd
+
+    close = pd.Series(np.linspace(100, 140, 60))
+    out = namespace["_p_stoch"](close, 14, 1, 3)
+
+    assert hasattr(out, "iloc"), out
+    assert not out.isna().all()
+
+    bands = namespace["_p_stoch"](close, close + 1.0, close - 1.0, 14)
+    assert not bands.isna().all()
