@@ -1056,6 +1056,12 @@ def _helper_namespace() -> dict:
         helpers.BASE_UTILS,
         helpers.STATE_SUPPORT,
         helpers.RUNTIME_SUPPORT,
+        # Indicator helpers live in their own blocks; a test that exercises an
+        # indicator has to load them too, exactly as ``helper_source`` would.
+        helpers._PREFIX,
+        helpers._PRICE_STATS,
+        helpers._CROSSES,
+        helpers._VOLATILITY,
         helpers.ARRAY_SUPPORT,
     ):
         exec(block, namespace)  # noqa: S102 - evaluating generated helpers
@@ -1353,3 +1359,257 @@ def test_a_loop_bound_of_na_does_not_raise():
     # rather than raising on ``int(nan)``.
     assert list(namespace["_p_loop_range"](float("nan"), float("nan"))) == [0]
     assert list(namespace["_p_loop_range"](0, 2)) == [0, 1, 2]
+
+
+def test_entry_when_guard_is_kept_as_the_order_condition():
+    """``strategy.entry(..., when=cond)`` only trades on the bars ``cond`` holds.
+
+    Dropping the guard makes the entry unconditional, which does not look like a
+    bug: the strategy still compiles, still trades, and still reports numbers.
+    The numbers are just for a different strategy, and every script written this
+    way collapses into the same "flip the target each bar" behaviour.
+    """
+    source = """
+//@version=5
+strategy("when guard", overlay=true)
+longCond = ta.crossover(ta.ema(close, 9), ta.ema(close, 21))
+shortCond = ta.crossunder(ta.ema(close, 9), ta.ema(close, 21))
+strategy.entry("long", strategy.long, when = longCond)
+strategy.entry("short", strategy.short, when = shortCond)
+"""
+
+    result = transpile_pine(source)
+
+    assert result.ok, result.blockers
+    assert result.stats["uses_when_guard"] is True
+    lines = [line.strip() for line in result.code.splitlines()]
+    long_at = lines.index('order_target_percent(_SYMBOL, 1.0, reason="pine_long")')
+    short_at = lines.index('order_target_percent(_SYMBOL, -1.0, reason="pine_short")')
+    assert lines[long_at - 1] == "if _p_truth(longCond):"
+    assert lines[short_at - 1] == "if _p_truth(shortCond):"
+    assert _compiles(result.code)
+
+
+def test_close_when_guard_is_kept_as_the_exit_condition():
+    """``strategy.close(..., when=cond)`` must not fire on every bar either."""
+    source = """
+//@version=5
+strategy("close guard", overlay=true)
+exitCond = ta.crossunder(ta.ema(close, 9), ta.ema(close, 21))
+strategy.entry("long", strategy.long)
+strategy.close("long", when = exitCond)
+"""
+
+    result = transpile_pine(source)
+
+    assert result.ok, result.blockers
+    lines = [line.strip() for line in result.code.splitlines()]
+    close_at = lines.index('order_target_percent(_SYMBOL, 0.0, reason="pine_close")')
+    assert lines[close_at - 1] == "if _p_truth(exitCond):"
+    assert _compiles(result.code)
+
+
+def test_an_entry_without_when_stays_unconditional():
+    """A plain ``strategy.entry`` has no guard to keep; it must not gain one."""
+    source = """
+//@version=5
+strategy("plain", overlay=true)
+if ta.crossover(ta.ema(close, 9), ta.ema(close, 21))
+    strategy.entry("long", strategy.long)
+"""
+
+    result = transpile_pine(source)
+
+    assert result.ok, result.blockers
+    assert result.stats["uses_when_guard"] is False
+    # The only condition around the order is the ``if`` the author wrote; no
+    # extra guard is invented for the call itself.
+    guards = [
+        line for line in result.code.splitlines()
+        if line.strip().startswith("if _p_truth(")
+    ]
+    assert len(guards) == 1, guards
+
+
+def test_a_var_array_keeps_the_array_it_was_declared_with():
+    """The slot has to start as the array, not as a scalar that swallows writes.
+
+    ``_p_array_set`` cannot mutate a float, and ``_state_get`` keeps whichever
+    fallback it saw first. A function translated before the declaration therefore
+    pinned the slot to ``nan``, every write was dropped, and every later read
+    returned a fresh empty array — a strategy with zero trades and no error.
+    """
+    source = """
+//@version=5
+strategy("var array", overlay=true)
+var buf = array.new_int(2)
+f_fill() =>
+    array.set(buf, 0, 7)
+f_fill()
+if array.get(buf, 0) == 7
+    strategy.entry("long", strategy.long)
+"""
+
+    result = transpile_pine(source)
+
+    assert result.ok, result.blockers
+    assert "float('nan')" not in _state_literal_of(result.code), _state_literal_of(result.code)
+    # Every read of the slot must default to the array the script declared;
+    # a scalar default is what made the writes disappear.
+    assert '_state_get("buf_v", _p_array_new(2))' in result.code
+    assert "_state_get(\"buf_v\", float('nan'))" not in result.code
+
+
+def _state_literal_of(code: str) -> str:
+    """Return the generated ``_STATE`` literal line, or an empty string."""
+    for line in code.splitlines():
+        if line.startswith("_STATE = "):
+            return line
+    return ""
+
+
+def test_history_applied_to_a_collection_call_reads_the_previous_bar():
+    """``array.get(buf, 0)[1]`` is the value that call returned on the last bar.
+
+    Pine has no "scalar" — every expression is a series, so indexing any
+    expression means "one bar ago". The translator renders ``array.get`` to a
+    plain number and ``_p_shift`` passes numbers through, which silently turns
+    ``x != x[1]`` into ``x != x``. This pins the replacement behaviour.
+    """
+    source = """
+//@version=5
+strategy("hist", overlay=true)
+var int[] buf = array.new_int(1)
+array.set(buf, 0, 1)
+prev = array.get(buf, 0)[1]
+if not na(prev) and prev == 1
+    strategy.entry("long", strategy.long)
+"""
+
+    result = transpile_pine(source)
+
+    assert result.ok, result.blockers
+    assert _scalar_hist_calls(result.code), "the call site keeps no history"
+    assert "_p_shift(_p_array_get(" not in result.code
+
+    namespace = _helper_namespace()
+    namespace["_STATE"] = {}
+    hist = namespace["_p_scalar_hist"]
+    namespace["_bar_index"] = 0
+    hist("_shv1", 1, 1)
+    namespace["_bar_index"] = 1
+    assert hist("_shv1", 0, 1) == 1
+    # Re-evaluating the same site on the same bar must not shift the offsets.
+    assert hist("_shv1", 0, 1) == 1
+
+
+def test_history_on_a_ta_call_still_uses_the_series_path():
+    """``ta.sma(close, 3)[1]`` already yields a Series; no history slot needed."""
+    source = """
+//@version=5
+strategy("ta hist", overlay=true)
+rising = ta.sma(close, 3)[1] < ta.sma(close, 3)
+if rising
+    strategy.entry("long", strategy.long)
+"""
+
+    result = transpile_pine(source)
+
+    assert result.ok, result.blockers
+    assert not _scalar_hist_calls(result.code)
+    assert "_p_shift(_p_sma(" in result.code
+
+
+def _scalar_hist_calls(code: str) -> list:
+    """Return the generated ``_p_scalar_hist`` call sites, not its definition."""
+    import re
+
+    return re.findall(r'_p_scalar_hist\("[^"]+"', code)
+
+
+def test_a_stop_exit_becomes_a_guarded_close():
+    """``strategy.exit`` has to close the position, not vanish.
+
+    The runtime trades target percentages, so a stop order becomes a close on the
+    bar the script's own condition fires. Dropping the call kept the position open
+    until the opposite entry arrived — a different strategy with a different
+    drawdown, and nothing in the output said so.
+    """
+    source = """
+//@version=5
+strategy("exit", overlay=true)
+longCond = ta.crossover(ta.ema(close, 9), ta.ema(close, 21))
+exitCond = ta.crossunder(ta.ema(close, 9), ta.ema(close, 21))
+strategy.entry("Long", strategy.long, when=longCond)
+strategy.exit("Exit Long", "Long", stop=longTrailingStop, when=exitCond)
+"""
+
+    result = transpile_pine(source)
+
+    assert result.ok, result.blockers
+    assert "strategy_exit_ignored" not in (result.warnings or [])
+    assert "strategy_exit_as_close" in (result.warnings or [])
+    lines = [line.strip() for line in result.code.splitlines()]
+    close_at = lines.index('order_target_percent(_SYMBOL, 0.0, reason="pine_exit")')
+    assert lines[close_at - 1] == "if _p_truth(exitCond):"
+
+
+def test_the_percentile_rank_is_not_the_close_series():
+    """An unmapped ``ta.*`` degrades to ``close_series``; a filter must not.
+
+    ``ta.percentile_nearest_rank`` compared against price collapsed to "close
+    versus close" and never fired, so the strategy backtested as if it never
+    wanted to trade while every intermediate name was defined.
+    """
+    source = """
+//@version=5
+strategy("pct", overlay=true)
+v = ta.percentile_nearest_rank(high, 7, 75)
+if close > v
+    strategy.entry("long", strategy.long)
+"""
+
+    result = transpile_pine(source)
+
+    assert result.ok, result.blockers
+    assert "ta_unsupported:percentile_nearest_rank" not in (result.warnings or [])
+    assert "_p_percentile_nearest_rank(" in result.code
+
+    namespace = _helper_namespace()
+    import numpy as np
+
+    values = np.arange(100, dtype="float64")[::-1]
+    import pandas as pd
+
+    series = pd.Series(values)
+    ranked = namespace["_p_percentile_nearest_rank"](series, 10, 75)
+    assert abs(float(ranked.iloc[-1]) - 7.0) < 1e-9, float(ranked.iloc[-1])
+
+
+def test_the_remaining_percentile_and_trend_names_translate():
+    """Every ``ta.*`` this corpus uses must have a real implementation."""
+    cases = {
+        "sar": "v = ta.sar(high, low, 0.02, 0.2)",
+        "cmo": "v = ta.cmo(close, 14)",
+        "tsi": "v = ta.tsi(close, 13, 25)",
+        "dema": "v = ta.dema(close, 20)",
+        "tema": "v = ta.tema(close, 20)",
+        "median": "v = ta.median(close, 20)",
+        "dev": "v = ta.dev(close, 20)",
+        "cog": "v = ta.cog(close, 10)",
+        "percentile_linear_interpolation": "v = ta.percentile_linear_interpolation(high, 7, 75)",
+    }
+    for name, line in cases.items():
+        source = f"""
+//@version=5
+strategy("{name}", overlay=true)
+{line}
+if close > v
+    strategy.entry("long", strategy.long)
+"""
+
+        result = transpile_pine(source)
+
+        assert result.ok, (name, result.blockers)
+        assert f"ta_unsupported:{name}" not in (result.warnings or []), name
+        assert "_p_" in result.code, name

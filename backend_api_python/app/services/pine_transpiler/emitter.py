@@ -132,6 +132,7 @@ class Emitter:
             "has_signal_entry": False,
             "signal_calls": 0,
             "uses_short": False,
+            "uses_when_guard": False,
             "emitted_statements": 0,
         }
         #: Timeframes subscribed through ``request.security``.
@@ -159,6 +160,9 @@ class Emitter:
         self.predeclared: list[str] = []
         #: Temporary counter for generated locals.
         self._counter = 0
+        #: State-slot names for expressions that have to remember their own past
+        #: values, keyed by the identity of the call site that produced them.
+        self._hist_keys: dict[int, str] = {}
         self._unsupported: set[str] = set()
 
     # -- public entry point ---------------------------------------------------
@@ -353,6 +357,16 @@ class Emitter:
         Functions may read script-level ``var`` variables; the slot names have to
         exist by then so the read compiles to a state lookup instead of an
         undefined local.
+
+        The initialiser has to be registered here as well, not only when the
+        declaration statement is reached: Pine functions are translated before
+        the script body, so a function that writes a script-level array would
+        otherwise resolve the slot with the generic ``float('nan')`` fallback.
+        ``_state_get`` adopts whichever fallback it sees first, and
+        ``_p_array_set`` cannot mutate a float — the write is silently dropped and
+        every later read of that slot sees an array nothing ever wrote to. That
+        is how a strategy ends up with zero trades while every intermediate
+        variable looks computed.
         """
         stack: list[tuple[Any, int]] = [(item, 0) for item in body]
         while stack:
@@ -371,7 +385,11 @@ class Emitter:
                     name = str(getattr(target, "id", "") or "")
                     if name:
                         if node_name(getattr(current, "mode", None)) in {"Var", "VarIp"}:
-                            self.state_key(name)
+                            key = self.state_key(name)
+                            if not level and key not in self.state_init:
+                                self.state_init[key] = self._expr(
+                                    getattr(current, "value", None)
+                                ) or "float('nan')"
                         else:
                             # Pine assignments made inside a branch stay visible
                             # afterwards; Python locals would not exist on the
@@ -667,22 +685,58 @@ class Emitter:
             return []
         if name in mapping.STRATEGY_ENTRY_CALLS:
             self.stats["has_strategy_entry"] = True
-            return [self._entry_order(name, node, indent)]
+            return self._entry_order(name, node, indent)
         if name in mapping.STRATEGY_CLOSE_CALLS:
             self.stats["has_strategy_close"] = True
             if self.entry_style == "none":
                 self.entry_style = "signal"
-            return [f"{indent}order_target_percent(_SYMBOL, 0.0, reason=\"pine_close\")"]
+            return self._guard_when(
+                node,
+                indent,
+                "order_target_percent(_SYMBOL, 0.0, reason=\"pine_close\")",
+            )
         if name in mapping.STRATEGY_EXIT_CALLS:
-            self._warn_once("strategy_exit_ignored")
-            return []
+            # ``strategy.exit`` names an order and attaches stops to it. The
+            # runtime only knows target percentages, so the exit becomes a close
+            # that fires when the script says it should. Dropping the call
+            # entirely kept the position open until the opposite entry arrived,
+            # which is a different strategy with a different drawdown.
+            self._warn_once("strategy_exit_as_close")
+            if self.entry_style == "none":
+                self.entry_style = "signal"
+            return self._guard_when(
+                node,
+                indent,
+                "order_target_percent(_SYMBOL, 0.0, reason=\"pine_exit\")",
+            )
         if name.startswith("risk"):
             self._warn_once("strategy_risk_ignored")
             return []
         self._warn_once(f"strategy_{name}_ignored")
         return []
 
-    def _entry_order(self, name: str, node: Any, indent: str) -> str:
+    def _guard_when(self, node: Any, indent: str, statement: str) -> list[str]:
+        """Wrap ``statement`` in the ``when=`` condition Pine attaches to it.
+
+        ``strategy.entry``, ``strategy.order``, ``strategy.close`` and
+        ``strategy.exit`` all accept ``when=``, and it is the only thing that
+        decides whether the order happens on this bar. Dropping it turns the
+        order unconditional, which is not a cosmetic difference: a script that
+        gated its entries on a crossover then re-enters on every bar, and every
+        such script collapses into the same unconditional
+        "flip the target each bar" strategy. Four unrelated scripts with
+        different code hashes produced byte-identical backtests that way.
+        """
+        when = self._call_arguments(node).get("when")
+        if when is None:
+            return [f"{indent}{statement}"]
+        condition = self._condition(when)
+        if condition in {"", "True"}:
+            return [f"{indent}{statement}"]
+        self.stats["uses_when_guard"] = True
+        return [f"{indent}if {condition}:", f"{indent}    {statement}"]
+
+    def _entry_order(self, name: str, node: Any, indent: str) -> list[str]:
         """Build the target-percentage order for an entry-like call."""
         arguments = self._call_arguments(node)
         is_short = name == "short"
@@ -697,11 +751,17 @@ class Emitter:
             self.stats["uses_short"] = True
             self.entry_style = "signal"
             self._warn_once("short_as_target_percent")
-            return (
-                f"{indent}order_target_percent(_SYMBOL, -1.0, reason=\"pine_short\")"
+            return self._guard_when(
+                node,
+                indent,
+                "order_target_percent(_SYMBOL, -1.0, reason=\"pine_short\")",
             )
         self.entry_style = "signal"
-        return f"{indent}order_target_percent(_SYMBOL, 1.0, reason=\"pine_long\")"
+        return self._guard_when(
+            node,
+            indent,
+            "order_target_percent(_SYMBOL, 1.0, reason=\"pine_long\")",
+        )
 
     def _emit_signal_statement(self, name: str, node: Any, indent: str) -> list[str]:
         """Turn an indicator's drawing or alert condition into an order.
@@ -1409,7 +1469,42 @@ class Emitter:
             return ""
         if rendered_offset in {"", "0"}:
             return rendered_value
+        if self._returns_scalar(value):
+            # ``array.get(buf, 1)[1]`` is legal Pine: the expression is a series
+            # of whatever that call returned each bar. ``_p_shift`` passes a
+            # plain number through untouched, which turned ``x != x[1]`` into
+            # ``x != x`` and made the condition permanently false.
+            self._register_helper("_p_scalar_hist")
+            key = self._hist_slot_key(node)
+            return f'_p_scalar_hist("{key}", {rendered_value}, {rendered_offset})'
         return f"_p_shift({rendered_value}, {rendered_offset})"
+
+    def _returns_scalar(self, node: Any) -> bool:
+        """Report whether a call yields a per-bar scalar the script may index.
+
+        Only the collection and math namespaces are listed: they return plain
+        numbers by construction, so an offset on them can only mean "the value
+        this same call produced on an earlier bar". ``ta.*`` already returns a
+        Series and keeps the existing ``_p_shift`` lowering.
+        """
+        if not is_node(node, "Call"):
+            return False
+        parts = self._call_parts(node)
+        if parts is None:
+            return False
+        _, owner = parts
+        return owner in {"array", "matrix", "map"}
+
+    def _hist_slot_key(self, node: Any) -> str:
+        """Return a stable per-call-site key for a scalar history slot."""
+        marker = id(node)
+        existing = self._hist_keys.get(marker)
+        if existing is not None:
+            return existing
+        self._counter += 1
+        key = f"_shv{self._counter}"
+        self._hist_keys[marker] = key
+        return key
 
     def _binary(self, node: Any) -> str:
         """Render a binary arithmetic operation."""

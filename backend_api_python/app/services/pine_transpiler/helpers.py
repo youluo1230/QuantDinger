@@ -538,6 +538,41 @@ def _p_prev(value, count):
     return value
 
 
+def _p_scalar_hist(key, value, count):
+    """Return what a per-bar *expression* evaluated to ``count`` bars back.
+
+    Pine treats every expression as a series, so ``array.get(buf, 1)[1]`` reads
+    the value that same call returned on the previous bar. The translator renders
+    such a call as a plain number, and ``_p_shift`` passes numbers through
+    unchanged — which quietly turns ``x != x[1]`` into ``x != x`` and makes the
+    condition permanently false. Remembering the recent results of that call site
+    is the only way to honour the indexing.
+
+    The key is generated per call site, so two identical-looking calls keep
+    separate histories, exactly as two separate Pine series would. A site reached
+    more than once in a bar records one sample per bar, which keeps the offsets
+    aligned with bars rather than with evaluations.
+    """
+    slot = _STATE.get(key)
+    if not isinstance(slot, dict):
+        slot = {"bar": -1, "vals": []}
+        _STATE[key] = slot
+    try:
+        bar = int(_bar_index)
+    except NameError:
+        bar = 0
+    if slot["bar"] != bar:
+        slot["vals"].append(_p_last(value))
+        slot["bar"] = bar
+        if len(slot["vals"]) > 64:
+            del slot["vals"][: len(slot["vals"]) - 64]
+    offset = int(float(count))
+    history = slot["vals"]
+    if offset < 0 or offset >= len(history):
+        return float("nan")
+    return history[-1 - offset]
+
+
 def _p_arange(count):
     return np.arange(max(0, int(count)), dtype="float64")
 
@@ -1159,6 +1194,154 @@ def _p_dmi(high, low, close, length, smoothing):
     spread = (plus_di + minus_di).replace(0.0, np.nan)
     dx = 100.0 * (plus_di - minus_di).abs() / spread
     return plus_di, minus_di, _p_rma(dx, smoothing)
+
+
+def _p_percentile_nearest_rank(series, length, percentile):
+    '''Return the value at the nearest rank inside the trailing window.
+
+    An unmapped ``ta.*`` call degrades to ``close_series``. That is survivable
+    for a filter and fatal for a strategy that compares the result against price:
+    the comparison becomes "close versus close" and never fires, so the strategy
+    backtests as if it never wanted to trade.
+    '''
+    window = _p_window(length)
+    target = float(percentile) / 100.0
+
+    def _pick(values):
+        usable = values[~np.isnan(values)]
+        if usable.size == 0:
+            return np.nan
+        ordered = np.sort(usable)
+        rank = int(np.ceil(target * ordered.size)) - 1
+        return float(ordered[min(max(rank, 0), ordered.size - 1)])
+
+    return _p_as_series(series).rolling(window, min_periods=window).apply(_pick, raw=True)
+
+
+def _p_percentile_linear_interpolation(series, length, percentile):
+    '''Return the linearly interpolated percentile of the trailing window.'''
+    window = _p_window(length)
+
+    def _pick(values):
+        usable = values[~np.isnan(values)]
+        if usable.size == 0:
+            return np.nan
+        return float(np.percentile(usable, float(percentile)))
+
+    return _p_as_series(series).rolling(window, min_periods=window).apply(_pick, raw=True)
+
+
+def _p_sar(high, low, step, maximum):
+    '''Return the parabolic stop-and-reverse level, statefully bar by bar.'''
+    highs = _p_as_series(high)
+    lows = _p_as_series(low)
+    index = highs.index
+    size = len(highs)
+    out = np.full(size, np.nan)
+    if size < 2:
+        return pd.Series(out, index=index)
+    upper = highs.to_numpy()
+    lower = lows.to_numpy()
+    rising = True
+    acceleration = float(step)
+    extreme = upper[0]
+    level = lower[0]
+    for position in range(1, size):
+        level = level + acceleration * (extreme - level)
+        if rising:
+            if lower[position] < level:
+                rising = False
+                level = extreme
+                extreme = lower[position]
+                acceleration = float(step)
+            elif upper[position] > extreme:
+                extreme = upper[position]
+                acceleration = min(acceleration + float(step), float(maximum))
+        else:
+            if upper[position] > level:
+                rising = True
+                level = extreme
+                extreme = upper[position]
+                acceleration = float(step)
+            elif lower[position] < extreme:
+                extreme = lower[position]
+                acceleration = min(acceleration + float(step), float(maximum))
+        out[position] = level
+    return pd.Series(out, index=index)
+
+
+def _p_cmo(series, length):
+    '''Return the Chande momentum oscillator.'''
+    window = _p_window(length)
+    delta = _p_as_series(series).diff()
+    gains = delta.clip(lower=0.0).rolling(window, min_periods=window).sum()
+    losses = (-delta).clip(lower=0.0).rolling(window, min_periods=window).sum()
+    total = (gains + losses).replace(0.0, np.nan)
+    return 100.0 * (gains - losses) / total
+
+
+def _p_tsi(series, short, long):
+    '''Return the true strength index.'''
+    delta = _p_as_series(series).diff()
+    smoothed = _p_ema(_p_ema(delta, long), short)
+    absolute = _p_ema(_p_ema(delta.abs(), long), short)
+    return 100.0 * smoothed / absolute.replace(0.0, np.nan)
+
+
+def _p_dema(series, length):
+    '''Return the double exponential moving average.'''
+    once = _p_ema(series, length)
+    return 2.0 * once - _p_ema(once, length)
+
+
+def _p_tema(series, length):
+    '''Return the triple exponential moving average.'''
+    once = _p_ema(series, length)
+    twice = _p_ema(once, length)
+    return 3.0 * once - 3.0 * twice + _p_ema(twice, length)
+
+
+def _p_median(series, length):
+    '''Return the rolling median.'''
+    window = _p_window(length)
+    return _p_as_series(series).rolling(window, min_periods=window).median()
+
+
+def _p_dev(series, length):
+    '''Return the mean absolute deviation from the moving average.'''
+    window = _p_window(length)
+    values = _p_as_series(series)
+    average = _p_sma(values, length)
+    return (values - average).abs().rolling(window, min_periods=window).mean()
+
+
+def _p_cog(series, length):
+    '''Return the center of gravity of the trailing window.'''
+    window = _p_window(length)
+
+    def _pick(values):
+        usable = values[~np.isnan(values)]
+        if usable.size == 0:
+            return np.nan
+        weights = np.arange(usable.size - 1, -1, -1, dtype="float64")
+        total = float(usable.sum())
+        if total == 0.0:
+            return np.nan
+        return float((weights * usable).sum() / total)
+
+    return _p_as_series(series).rolling(window, min_periods=window).apply(_pick, raw=True)
+
+
+def _p_kc(series, high, low, length, multiplier, use_ema=True, use_true_range=True):
+    '''Return the Keltner channel as ``(basis, upper, lower)``.'''
+    values = _p_as_series(series)
+    basis = _p_ema(values, length) if use_ema else _p_sma(values, length)
+    if use_true_range:
+        span = _p_atr(_p_as_series(high), _p_as_series(low), values, length)
+    else:
+        span = _p_stdev(values, length)
+    band = span * float(multiplier)
+    return basis, basis + band, basis - band
 """
 
 STATE_SUPPORT: Final[str] = '''def _state_get(key, fallback):
@@ -1753,6 +1936,17 @@ _GROUPS: Final[dict[str, tuple[str, ...]]] = {
         "supertrend",
         "percentrank",
         "dmi",
+        "percentile_nearest_rank",
+        "percentile_linear_interpolation",
+        "sar",
+        "cmo",
+        "tsi",
+        "dema",
+        "tema",
+        "median",
+        "dev",
+        "cog",
+        "kc",
     ),
     "array": (
         "array_new",

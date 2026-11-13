@@ -160,6 +160,44 @@ TA_SPECS: Final[dict[str, TASpec]] = {
         ),
         3,
     ),
+    "percentile_nearest_rank": (
+        "percentile_nearest_rank",
+        ((0, "close_series"), (1, "100"), (2, "50")),
+        1,
+    ),
+    "percentile_linear_interpolation": (
+        "percentile_linear_interpolation",
+        ((0, "close_series"), (1, "100"), (2, "50")),
+        1,
+    ),
+    "sar": (
+        "sar",
+        (
+            (None, "high_series"),
+            (None, "low_series"),
+            (0, "0.02"),
+            (1, "0.2"),
+        ),
+        1,
+    ),
+    "cmo": ("cmo", ((0, "close_series"), (1, "14")), 1),
+    "tsi": ("tsi", ((0, "close_series"), (1, "13"), (2, "25")), 1),
+    "dema": ("dema", ((0, "close_series"), (1, "20")), 1),
+    "tema": ("tema", ((0, "close_series"), (1, "20")), 1),
+    "median": ("median", ((0, "close_series"), (1, "20")), 1),
+    "dev": ("dev", ((0, "close_series"), (1, "20")), 1),
+    "cog": ("cog", ((0, "close_series"), (1, "10")), 1),
+    "kc": (
+        "kc",
+        (
+            (0, "close_series"),
+            (None, "high_series"),
+            (None, "low_series"),
+            (1, "20"),
+            (2, "2.0"),
+        ),
+        3,
+    ),
 }
 
 #: Tuple component names for indicators that return several series.
@@ -168,6 +206,7 @@ TA_OUTPUT_NAMES: Final[dict[str, tuple[str, ...]]] = {
     "macd": ("line", "signal", "hist"),
     "bb": ("basis", "upper", "lower"),
     "dmi": ("plus", "minus", "adx"),
+    "kc": ("basis", "upper", "lower"),
 }
 
 #: Pine series variables available on every bar and the emitted frame column.
