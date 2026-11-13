@@ -298,7 +298,12 @@ plot(ta.sma(close, 20))
     assert result.error
 
 
-def test_unsupported_matrix_construct_is_blocked():
+def test_a_matrix_strategy_translates_instead_of_being_blocked():
+    """`matrix.*` used to reject the script; the runtime can express it.
+
+    This is the same source that used to be blocked, kept as a regression: it
+    must now compile, and it must still emit the matrix call.
+    """
     source = """
 //@version=5
 strategy("Matrix", overlay=true)
@@ -309,8 +314,9 @@ if ta.crossover(close, ta.sma(close, 9))
 
     result = transpile_pine(source)
 
-    assert result.ok is False
-    assert any("matrix" in blocker for blocker in result.blockers)
+    assert result.ok is True, result.blockers
+    assert "_p_matrix_new" in result.code
+    assert not any("matrix" in blocker for blocker in result.blockers)
 
 
 def test_empty_source_returns_error_instead_of_raising():
@@ -1199,3 +1205,51 @@ def test_a_matrix_declared_with_na_starts_empty():
     namespace = {"np": np, "pd": pd}
     exec(helpers.BASE_UTILS, namespace)  # noqa: S102
     assert namespace["_p_matrix_new"](float("nan")) == []
+
+
+def test_matrix_arithmetic_matches_the_textbook_result():
+    """`matrix.*` was a blocking construct even though the helpers existed.
+
+    Eleven scripts were rejected outright for using `matrix.mult`, `matrix.inv`,
+    `matrix.transpose`, `matrix.row` or `matrix.col`, all of which the runtime
+    can express on the list-of-rows representation it already uses. Rejecting a
+    script for a namespace the helper layer supports is worse than translating
+    it: nothing reaches the backtest, so nothing can be judged.
+    """
+    import numpy as np
+    import pandas as pd
+
+    from app.services.pine_transpiler import helpers
+
+    namespace = {"np": np, "pd": pd}
+    exec(helpers.BASE_UTILS, namespace)  # noqa: S102 - helpers are source text
+
+    multiply = namespace["_p_matrix_multiply"]
+    assert multiply([[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]) == [
+        [19.0, 22.0],
+        [43.0, 50.0],
+    ]
+    # A shape mismatch returns an empty matrix rather than a partial product.
+    assert multiply([[1.0, 2.0]], [[1.0], [2.0], [3.0]]) == []
+
+    transpose = namespace["_p_matrix_transpose"]
+    assert transpose([[1.0, 2.0], [3.0, 4.0]]) == [[1.0, 3.0], [2.0, 4.0]]
+
+    inverse = namespace["_p_matrix_inverse"]
+    product = multiply([[2.0, 1.0], [1.0, 3.0]], inverse([[2.0, 1.0], [1.0, 3.0]]))
+    assert product[0][0] == pytest.approx(1.0)
+    assert product[1][0] == pytest.approx(0.0)
+    assert namespace["_p_matrix_inverse"]([[0.0, 0.0], [0.0, 0.0]]) == [[0.0, 0.0], [0.0, 0.0]]
+
+    assert namespace["_p_matrix_row"]([[1.0, 2.0]], 0) == [1.0, 2.0]
+    assert namespace["_p_matrix_col"]([[1.0, 2.0], [3.0, 4.0]], 1) == [2.0, 4.0]
+
+
+def test_matrix_and_map_are_no_longer_blocking():
+    """The blocker table must not reject a namespace the emitter translates."""
+    from app.services.pine_transpiler import mapping
+
+    assert "matrix." not in mapping.BLOCKING_PATTERNS
+    assert "map." not in mapping.BLOCKING_PATTERNS
+    for name in ("matrix.mult", "matrix.inv", "matrix.transpose", "matrix.row", "matrix.col"):
+        assert name in mapping.MATRIX_CALLS, f"{name} must translate, not block"

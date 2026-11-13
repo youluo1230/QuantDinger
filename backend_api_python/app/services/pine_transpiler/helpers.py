@@ -266,6 +266,108 @@ def _p_matrix_columns(matrix):
     return 0.0
 
 
+def _p_matrix_row(matrix, index):
+    """Pine ``matrix.row``: one row of the implied matrix."""
+    if not isinstance(matrix, (list, tuple)):
+        return []
+    try:
+        return list(matrix[int(float(index))])
+    except (IndexError, TypeError, ValueError):
+        return []
+
+
+def _p_matrix_col(matrix, index):
+    """Pine ``matrix.col``: one column, gathered across the rows."""
+    if not isinstance(matrix, (list, tuple)):
+        return []
+    try:
+        column = int(float(index))
+    except (TypeError, ValueError):
+        return []
+    output = []
+    for row in matrix:
+        if isinstance(row, (list, tuple)) and 0 <= column < len(row):
+            output.append(row[column])
+    return output
+
+
+def _p_matrix_transpose(matrix):
+    """Pine ``matrix.transpose``: rows become columns."""
+    if not isinstance(matrix, (list, tuple)) or not matrix:
+        return []
+    width = max((len(row) for row in matrix if isinstance(row, (list, tuple))), default=0)
+    return [[row[column] if isinstance(row, (list, tuple)) and column < len(row) else 0.0
+             for row in matrix]
+            for column in range(width)]
+
+
+def _p_matrix_multiply(left, right):
+    """Pine ``matrix.mult``: the ordinary matrix product.
+
+    The helper works on the list-of-rows representation the rest of this module
+    uses, so a strategy that multiplies matrices gets the same numbers it would
+    on TradingView rather than a dropped statement.
+    """
+    if not isinstance(left, (list, tuple)) or not isinstance(right, (list, tuple)):
+        return []
+    if not left or not right:
+        return []
+    inner = len(right)
+    if any(len(row) != inner for row in right if isinstance(row, (list, tuple))):
+        return []
+    width = len(right[0]) if right and isinstance(right[0], (list, tuple)) else 0
+    output = []
+    for row in left:
+        if not isinstance(row, (list, tuple)) or len(row) != inner:
+            return []
+        output.append([sum(float(row[k]) * float(right[k][column]) for k in range(inner))
+                       for column in range(width)])
+    return output
+
+
+def _p_matrix_id(size):
+    """Pine ``matrix.new`` with ones on the diagonal is how scripts write an id."""
+    try:
+        count = int(float(size))
+    except (TypeError, ValueError):
+        count = 0
+    return [[1.0 if row == column else 0.0 for column in range(count)] for row in range(count)]
+
+
+def _p_matrix_inverse(matrix):
+    """Pine ``matrix.inv``: Gauss-Jordan on the list-of-rows representation.
+
+    A singular matrix yields zeros rather than raising, because a Pine script
+    that inverts a degenerate matrix and reads the result must still run bar
+    after bar; TradingView returns NaN entries there.
+    """
+    if not isinstance(matrix, (list, tuple)) or not matrix:
+        return []
+    size = len(matrix)
+    if any(not isinstance(row, (list, tuple)) or len(row) != size for row in matrix):
+        return []
+    augmented = [
+        [float(value) for value in row]
+        + [1.0 if index == column else 0.0 for column in range(size)]
+        for index, row in enumerate(matrix)
+    ]
+    for column in range(size):
+        pivot = max(range(column, size), key=lambda row: abs(augmented[row][column]))
+        if abs(augmented[pivot][column]) < 1e-12:
+            return [[0.0 for _ in range(size)] for _ in range(size)]
+        augmented[column], augmented[pivot] = augmented[pivot], augmented[column]
+        divisor = augmented[column][column]
+        augmented[column] = [value / divisor for value in augmented[column]]
+        for row in range(size):
+            if row == column:
+                continue
+            factor = augmented[row][column]
+            if factor:
+                augmented[row] = [value - factor * other
+                                  for value, other in zip(augmented[row], augmented[column])]
+    return [row[size:] for row in augmented]
+
+
 def _p_map_put(mapping, key, value):
     if isinstance(mapping, dict):
         mapping[key] = value

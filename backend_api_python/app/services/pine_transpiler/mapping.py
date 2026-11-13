@@ -544,6 +544,11 @@ MATRIX_CALLS: Final[dict[str, str]] = {
     "matrix.set": "_p_matrix_set",
     "matrix.rows": "_p_matrix_rows",
     "matrix.columns": "_p_matrix_columns",
+    "matrix.row": "_p_matrix_row",
+    "matrix.col": "_p_matrix_col",
+    "matrix.transpose": "_p_matrix_transpose",
+    "matrix.mult": "_p_matrix_multiply",
+    "matrix.inv": "_p_matrix_inverse",
 }
 
 #: ``map.*`` calls (Pine maps are plain dicts here).
@@ -641,8 +646,6 @@ REQUEST_SECURITY_CALLS: Final[frozenset[str]] = frozenset(
 
 #: Blocking constructs: substring pattern -> machine-readable blocker identifier.
 BLOCKING_PATTERNS: Final[dict[str, str]] = {
-    "matrix.": "matrix_unsupported",
-    "map.": "map_unsupported",
     "polyline.": "polyline_unsupported",
     "request.financial": "request_financial_unsupported",
     "request.dividends": "request_dividends_unsupported",
