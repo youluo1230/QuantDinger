@@ -725,14 +725,28 @@ def _p_fill(value, frame):
     return pd.Series(number, index=frame.index, dtype="float64")
 
 
+def _p_loop_count(value):
+    """Coerce a loop bound to an int, reading ``na`` as zero.
+
+    Pine lets a loop bound be ``na`` — a series that has not started yet, or a
+    length an input left unset — and treats it as zero rather than refusing.
+    ``int(nan)`` raises, which turned a legitimate empty loop into a runtime
+    failure that said nothing about the script.
+    """
+    number = _p_num(_p_last(value))
+    if number != number or number in (float("inf"), float("-inf")):
+        return 0
+    return int(number)
+
+
 def _p_loop_range(start, end, step=None):
     """Return the integer sequence a Pine ``for ... to`` loop would walk."""
-    first = int(_p_num(_p_last(start)))
-    last = int(_p_num(_p_last(end)))
+    first = _p_loop_count(start)
+    last = _p_loop_count(end)
     if step is None or step == 0:
         stride = 1 if last >= first else -1
     else:
-        stride = int(_p_num(_p_last(step)))
+        stride = _p_loop_count(step)
         if stride == 0:
             stride = 1
     stride = abs(stride) if last >= first else -abs(stride)
@@ -1163,6 +1177,28 @@ def _state_set(key, value):
     """Write a persistent Pine ``var`` slot, collapsing series to this bar."""
     _STATE[key] = _p_last(value)
     return _STATE[key]
+
+
+def _p_iter(value):
+    """Return what a Pine ``for ... in`` should walk, tolerating ``na``.
+
+    A Pine loop over a value that never became an array — a ``var`` slot still
+    holding ``na``, or a series where the script expected a collection — simply
+    runs zero times. Python raises ``TypeError`` for the same expression, which
+    turned a script that had merely not filled its buffer yet into a runtime
+    failure with no useful line.
+    """
+    if isinstance(value, (list, tuple, dict, set, str)):
+        return value
+    if hasattr(value, "tolist"):
+        try:
+            items = value.tolist()
+        except (TypeError, ValueError):
+            return ()
+        return items if isinstance(items, list) else ()
+    if value is None:
+        return ()
+    return ()
 
 
 def _limited(value):

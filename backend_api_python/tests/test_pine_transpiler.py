@@ -1052,7 +1052,12 @@ def _helper_namespace() -> dict:
     from app.services.pine_transpiler import helpers
 
     namespace: dict = {"np": np, "pd": pd}
-    for block in (helpers.BASE_UTILS, helpers.RUNTIME_SUPPORT, helpers.ARRAY_SUPPORT):
+    for block in (
+        helpers.BASE_UTILS,
+        helpers.STATE_SUPPORT,
+        helpers.RUNTIME_SUPPORT,
+        helpers.ARRAY_SUPPORT,
+    ):
         exec(block, namespace)  # noqa: S102 - evaluating generated helpers
     return namespace
 
@@ -1277,3 +1282,74 @@ def test_triple_quoted_strings_are_folded_before_parsing():
 
     assert parse("x = '''a\nb'''\ny = 2\n") is not None
     assert _fold_triple_quoted_strings('x = "abc"') == 'x = "abc"'
+
+
+def test_matrix_namespace_calls_do_not_take_the_namespace_as_receiver():
+    """``matrix.rows(m)`` is a namespace call, not a method on a value.
+
+    The method syntax ``m.rows()`` routes the receiver into the first argument.
+    Reading the namespace form the same way emitted ``_p_matrix_rows(matrix, m)``
+    — with the literal word ``matrix`` as the first argument — so every script
+    that used the ordinary spelling died with `name 'matrix' is not defined`.
+    """
+    source = (
+        "//@version=5\n"
+        "strategy('t')\n"
+        "var matrix<float> m = matrix.new<float>(0, 4)\n"
+        "rows = matrix.rows(m)\n"
+        "cell = matrix.get(m, 0, 2)\n"
+        "matrix.set(m, 0, 1, 2.0)\n"
+        "if rows > 0\n"
+        "    strategy.entry('L', strategy.long)\n"
+    )
+    result = transpile_pine(source)
+    assert result.ok, result.blockers
+    assert "_p_matrix_rows(_state_get" in result.code
+    # The helper definition itself takes a parameter named ``matrix``; only the
+    # call site matters, so the comma after the name is part of the assertion.
+    assert "_p_matrix_rows(matrix," not in result.code
+    assert "_p_matrix_get(_state_get" in result.code
+
+
+def test_a_table_handle_is_not_a_list():
+    """``dashboard.clear(...)`` on a ``table`` is a display call.
+
+    The name lookup alone cannot tell a table handle from an array, so
+    ``dash.clear(0, 0, 8, 79)`` was routed into ``_p_array_clear`` with the
+    table itself as the argument and raised a signature error.
+    """
+    source = (
+        "//@version=5\n"
+        "strategy('t')\n"
+        "var table dash = table.new(position.top_right, 9, 80)\n"
+        "n = 0\n"
+        "if barstate.islast\n"
+        "    dash.clear(0, 0, 8, 79)\n"
+        "    n := 1\n"
+        "if n >= 0\n"
+        "    strategy.entry('L', strategy.long)\n"
+    )
+    result = transpile_pine(source)
+    assert result.ok, result.blockers
+    # The helper is not even emitted: nothing in the script needs it any more.
+    call_sites = [line for line in result.code.splitlines() if "_p_array_clear(" in line]
+    assert call_sites == [], call_sites
+
+
+def test_a_loop_over_na_runs_zero_times_instead_of_raising():
+    """Pine walks an ``na`` iterable zero times; Python would raise."""
+    namespace = _helper_namespace()
+    walk = namespace["_p_iter"]
+    assert list(walk(float("nan"))) == []
+    assert list(walk(None)) == []
+    assert list(walk([1.0, 2.0])) == [1.0, 2.0]
+    assert walk("abc") == "abc"
+
+
+def test_a_loop_bound_of_na_does_not_raise():
+    """``for i = 0 to na`` is an empty loop in Pine, not a crash."""
+    namespace = _helper_namespace()
+    # ``na`` reads as zero, so ``for i = 0 to na`` walks the single bound value
+    # rather than raising on ``int(nan)``.
+    assert list(namespace["_p_loop_range"](float("nan"), float("nan"))) == [0]
+    assert list(namespace["_p_loop_range"](0, 2)) == [0, 1, 2]

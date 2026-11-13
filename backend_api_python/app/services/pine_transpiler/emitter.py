@@ -57,6 +57,13 @@ RESERVED_IDENTIFIERS: frozenset[str] = frozenset(
     }
 )
 
+#: Pine types that carry drawing objects rather than trading values. A variable
+#: declared with one of these is a handle whose methods only paint: routing
+#: ``dashboard.clear(...)`` into ``array.clear`` would try to clear a table.
+_DRAWING_TYPES: frozenset[str] = frozenset(
+    {"table", "line", "label", "box", "polyline", "linefill", "plot"}
+)
+
 #: Maximum number of emitted statements before the transpiler gives up.
 STATEMENT_LIMIT = 4000
 
@@ -83,6 +90,8 @@ class Emitter:
         #: Pine identifier -> emitted Python name.
         self.names: dict[str, str] = {}
         self.function_methods: set[str] = set()
+        #: Pine identifier -> declared Pine type name, when the source states it.
+        self.declared_types: dict[str, str] = {}
         #: User ``type`` declarations, mapped to their field names in order.
         self.user_types: dict[str, list[str]] = {}
         #: Variables whose value is an instance of a user type.
@@ -234,6 +243,13 @@ class Emitter:
         # branch is a mutable flag, and folding it to ``False`` would leave the
         # reassignment writing to a name the rest of the code never reads, so
         # every ``if buy_signal`` would test the constant instead of the flag.
+        for node in body:
+            if not is_node(node, "Assign"):
+                continue
+            target = getattr(node, "target", None)
+            declared = self._type_name_of(getattr(node, "type", None))
+            if is_node(target, "Name") and declared:
+                self.declared_types[str(getattr(target, "id", ""))] = declared
         reassigned = self._reassigned_names(body)
         for node in body:
             if not is_node(node, "Assign"):
@@ -1084,7 +1100,8 @@ class Emitter:
         if not iterator:
             # Nothing to iterate over, but the body must still stay a block.
             return [f"{indent}if True:", *body]
-        return [f"{indent}for {py} in {iterator}:", *body]
+        self._register_helper("_p_iter")
+        return [f"{indent}for {py} in _p_iter({iterator}):", *body]
 
     def _emit_switch(self, node: Any, indent: str, depth: int) -> list[str]:
         """Translate ``switch`` into an ``if``/``elif`` chain."""
@@ -1579,6 +1596,11 @@ class Emitter:
             return self._string_call(name, node)
         if owner == "array":
             return self._array_call(name, node)
+        if owner in {"matrix", "map"}:
+            # These are namespaces, not receivers: ``matrix.rows(m)`` must not
+            # route the word "matrix" into the argument list the way the
+            # method syntax ``m.rows()`` would.
+            return self._namespace_call(owner, name, node)
         if not owner and name == "input":
             # Deprecated flat form: ``input(defval, title)``.
             return self._input_value(node)
@@ -1721,6 +1743,16 @@ class Emitter:
             return f"{instance}['{attribute}']"
         return ""
 
+    def _type_name_of(self, node: Any) -> str:
+        """Return the Pine type name a declaration states, if it states one."""
+        if is_node(node, "Name"):
+            return str(getattr(node, "id", ""))
+        if is_node(node, "Specialize"):
+            inner = getattr(node, "value", None)
+            if is_node(inner, "Name"):
+                return str(getattr(inner, "id", ""))
+        return ""
+
     def _method_call(self, owner: str, name: str, node: Any) -> str:
         """Render ``receiver.method(args)`` as a function call.
 
@@ -1730,6 +1762,12 @@ class Emitter:
         """
         receiver = self._name_ref(owner)
         if not receiver:
+            return ""
+        if self.declared_types.get(owner) in _DRAWING_TYPES:
+            # ``dash.clear(0, 0, 8, 79)`` on a ``table`` is a display call, not
+            # ``array.clear``: without the declared type the name lookup alone
+            # routes it into the list helpers with the table itself as the list.
+            self._note_dropped(f"{owner}.{name}")
             return ""
         arguments = [self._expr(item) for item in self._positional(node)]
         arguments = [item for item in arguments if item]
@@ -1953,6 +1991,28 @@ class Emitter:
         if not arguments:
             return "[]" if target == "_p_array_new" else ""
         return f"{target}({joined})"
+
+    def _namespace_call(self, namespace: str, name: str, node: Any) -> str:
+        """Render a static ``matrix.*``/``map.*`` call onto its helper.
+
+        Pine spells these the same way as a method on an instance
+        (``m.rows()``), but the far more common form is the namespace call
+        (``matrix.rows(m)``). Only the instance form carries a receiver as the
+        first argument, so the namespace form must not prepend one.
+        """
+        arguments = [self._expr(item) for item in self._positional(node)]
+        arguments = [item for item in arguments if item]
+        targets = mapping.MATRIX_CALLS if namespace == "matrix" else mapping.MAP_CALLS
+        target = targets.get(f"{namespace}.{name}")
+        if target is None:
+            self._warn_once(f"{namespace}_unsupported:{name}")
+            return ""
+        self._register_helper(target)
+        if not arguments:
+            if target in {"_p_matrix_new", "_p_map_new"}:
+                return f"{target}()"
+            return ""
+        return f"{target}({', '.join(arguments)})"
 
     def _request_or_input(self, name: str, owner: str, node: Any) -> str:
         """Render ``input.*`` and ``request.security`` expressions."""
