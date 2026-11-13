@@ -219,7 +219,10 @@ def _p_time_series(frame):
 
 def _p_matrix_new(size=0, fill=0.0):
     """Minimal matrix stand-in: a list of rows, enough for generic calls."""
-    count = max(0, int(size))
+    try:
+        count = max(0, int(size))
+    except (TypeError, ValueError):
+        count = 0
     return [[fill for _ in range(count)] for _ in range(count)]
 
 
@@ -1337,7 +1340,20 @@ RUNTIME_HELPER_NAMES: Final[tuple[str, ...]] = (
 
 
 ARRAY_SUPPORT: Final[str] = '''def _p_array_new(size=0, fill=0.0):
-    count = max(0, int(size))
+    """Pine ``array.new_*``.
+
+    ``array.new_color(na)`` is how Pine writes "an empty array", and ``na``
+    arrives here as NaN. Running ``int(NaN)`` raises, so a script that only ever
+    declared an array this way died on its first bar with "cannot convert float
+    NaN to integer" — a message that points at the helper, not at the source line
+    that said ``na``.
+    """
+    try:
+        count = int(size)
+    except (TypeError, ValueError):
+        count = 0
+    if count <= 0:
+        return []
     return [fill for _ in range(count)]
 
 

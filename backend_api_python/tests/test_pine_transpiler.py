@@ -1163,3 +1163,39 @@ def test_timestamp_defaults_are_comparable_with_bar_time():
     calendar = namespace["_p_timestamp"](2026, 11, 1)
     assert calendar <= bar_time
     assert calendar == 1793491200000
+
+
+def test_an_array_declared_with_na_starts_empty():
+    """``array.new_color(na)`` is Pine's spelling for an empty array.
+
+    ``na`` reaches the helper as NaN, and ``int(NaN)`` raises, so a script that
+    declared an array this way died on its first bar. The message ("cannot
+    convert float NaN to integer") names the helper, not the ``na`` in the
+    source, which is why this looked like a transpiler bug for three separate
+    strategies.
+    """
+    import numpy as np
+    import pandas as pd
+
+    from app.services.pine_transpiler import helpers
+
+    namespace = {"np": np, "pd": pd}
+    exec(helpers.BASE_UTILS, namespace)  # noqa: S102 - helpers are source text
+    exec(helpers.ARRAY_SUPPORT, namespace)  # noqa: S102
+
+    array_new = namespace["_p_array_new"]
+    assert array_new(float("nan")) == []
+    assert array_new(float("nan"), "x") == []
+    assert array_new() == []
+    assert array_new(3, "x") == ["x", "x", "x"]
+
+
+def test_a_matrix_declared_with_na_starts_empty():
+    import numpy as np
+    import pandas as pd
+
+    from app.services.pine_transpiler import helpers
+
+    namespace = {"np": np, "pd": pd}
+    exec(helpers.BASE_UTILS, namespace)  # noqa: S102
+    assert namespace["_p_matrix_new"](float("nan")) == []
