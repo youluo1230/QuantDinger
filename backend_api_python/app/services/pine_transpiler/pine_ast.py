@@ -8,6 +8,7 @@ imports ``pynescript``.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 
@@ -76,6 +77,31 @@ def node_class(name: str) -> type:
     raise ParserUnavailable(f"pynescript node type is missing: {name}")
 
 
+#: Pine's triple-quoted string, which the parser this project uses does not
+#: accept in any form — not even on a single line.
+_TRIPLE_QUOTE = re.compile(r"""('''|\"\"\")(.*?)\1""", re.DOTALL)
+
+
+def _fold_triple_quoted_strings(text: str) -> str:
+    """Rewrite Pine's triple-quoted strings as ordinary escaped ones.
+
+    The parser rejects triple-quoted strings outright (``mismatched input
+    '"abc"' expecting {',', NEWLINE}``), so a script whose only sin is a multi-line
+    tooltip or a block of documentation fails to parse at all. Replacing the
+    delimiters keeps the text, which is the whole of what the translator reads:
+    these literals become ``input`` titles and tooltips, and the emitter drops
+    those anyway. Line numbers after a folded block do shift, and nothing in the
+    emitter consults them.
+    """
+    def replace(match: "re.Match[str]") -> str:
+        body = match.group(2)
+        body = body.replace("\\", "\\\\").replace('"', '\\"')
+        body = body.replace("\n", "\\n").replace("\r", "")
+        return f'"{body}"'
+
+    return _TRIPLE_QUOTE.sub(replace, text)
+
+
 def parse(source: str) -> Any:
     """Parse Pine Script ``source`` into a ``Script`` node.
 
@@ -87,7 +113,7 @@ def parse(source: str) -> Any:
     if not text.strip():
         raise PineParseError("empty_source")
     try:
-        return module.parse(text)
+        return module.parse(_fold_triple_quoted_strings(text))
     except Exception as exc:  # The parser raises its own SyntaxError family.
         raise PineParseError(f"{type(exc).__name__}: {exc}".strip()) from exc
 

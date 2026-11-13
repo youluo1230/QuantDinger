@@ -1253,3 +1253,27 @@ def test_matrix_and_map_are_no_longer_blocking():
     assert "map." not in mapping.BLOCKING_PATTERNS
     for name in ("matrix.mult", "matrix.inv", "matrix.transpose", "matrix.row", "matrix.col"):
         assert name in mapping.MATRIX_CALLS, f"{name} must translate, not block"
+
+
+def test_triple_quoted_strings_are_folded_before_parsing():
+    """Pine allows multi-line tooltips; the parser does not accept them at all.
+
+    script rejects triple-quoted literals outright — even on one line — so a
+    script whose only sin is a documentation block failed to parse. Folding the
+    delimiters keeps the text, which is all the translator reads.
+    """
+    from app.services.pine_transpiler.pine_ast import (
+        _fold_triple_quoted_strings,
+        parse,
+    )
+
+    source = 'x = """line one\nline two"""\ny = 1\n'
+    folded = _fold_triple_quoted_strings(source)
+    # The literal collapses onto one physical line; the statement after it stays.
+    assert '"""' not in folded
+    assert folded.endswith("y = 1\n")
+    assert "line one\\nline two" in folded
+    assert parse(source) is not None
+
+    assert parse("x = '''a\nb'''\ny = 2\n") is not None
+    assert _fold_triple_quoted_strings('x = "abc"') == 'x = "abc"'
