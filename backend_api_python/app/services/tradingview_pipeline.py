@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -210,6 +211,16 @@ BACKTEST_TIMEOUT_SEC = max(60, int(os.getenv("TRADINGVIEW_BACKTEST_TIMEOUT_SEC",
 #: the backtest window must be validated *including* this warmup; validating
 #: without it accepted windows the engine then rejected as ``backtestRangeLimit``.
 _WARMUP_BARS = 300
+
+#: Total time one strategy may spend across every window attempt.
+# A timeout now retries narrower, and each rung may take the full per-attempt
+# ceiling, so without a chain-wide bound a single pathological script could walk
+# eleven rungs for the price of eleven strategies. Stopping at the ceiling tells
+# the batch this strategy is expensive rather than letting it own the night.
+RETRY_CHAIN_BUDGET_SEC = max(
+    BACKTEST_TIMEOUT_SEC,
+    int(os.getenv("TRADINGVIEW_RETRY_CHAIN_BUDGET_SEC", "900")),
+)
 
 
 def _assess_module():
@@ -1134,6 +1145,12 @@ _WINDOW_TOO_WIDE_MARKERS = (
     "noMarketData",
     "insufficientWarmupData",
     "backtestRangeLimit",
+    # A strategy that recomputes its whole history on every bar exceeds the
+    # per-strategy ceiling on a long window and finishes on a short one. The
+    # timeout says nothing about whether the strategy works, only that this
+    # window costs more than the ceiling allows, so it belongs with the other
+    # window-shaped failures rather than parked as broken.
+    "timed out",
 )
 
 #: Windows to fall back to, in days, when the preferred one is unavailable.
@@ -1237,7 +1254,16 @@ def _run_with_retries(
     """
     last: Optional[BaseException] = None
     span_days = max(1, (end - start).days)
+    chain_started = time.monotonic()
     for days in (span_days, *(item for item in _RETRY_WINDOWS if item < span_days)):
+        if last is not None and time.monotonic() - chain_started > RETRY_CHAIN_BUDGET_SEC:
+            logger.info(
+                "Giving up on source %s after %s window attempts: %s",
+                source_id,
+                days,
+                str(last)[:160],
+            )
+            raise last
         attempt_end = end
         attempt_start = attempt_end - timedelta(days=days)
         try:

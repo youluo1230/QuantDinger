@@ -1605,3 +1605,29 @@ def test_the_retry_ladder_reaches_a_minute_bar_venue(monkeypatch):
     assert pipeline_module._RETRY_WINDOWS == tuple(
         sorted(pipeline_module._RETRY_WINDOWS, reverse=True)
     ), "the ladder must narrow monotonically"
+
+
+def test_a_timeout_narrows_the_window_instead_of_parking_the_strategy():
+    """A slow strategy is not a broken one.
+
+    Recomputing the whole history on every bar legitimately exceeds the
+    per-strategy ceiling on a long window and finishes on a short one, so a
+    timeout has to be retried narrower rather than parked as `backtest_failed`.
+    """
+    from app.services.tradingview_pipeline import _window_too_wide
+    from app.utils.safe_exec import TimeoutError as SandboxTimeoutError
+
+    assert _window_too_wide(SandboxTimeoutError("Code execution timed out after 300 seconds"))
+    assert _window_too_wide(RuntimeError("strategyV2.runtimeFailed:handle_data:Code execution timed out after 300 seconds"))
+    # A real defect must not be retried on eleven windows for nothing.
+    assert not _window_too_wide(NameError("name 'x' is not defined"))
+
+
+def test_the_retry_chain_has_a_total_budget():
+    """Each rung may burn the full per-attempt ceiling, so the chain is bounded."""
+    from app.services import tradingview_pipeline as pipeline
+
+    assert pipeline.RETRY_CHAIN_BUDGET_SEC >= pipeline.BACKTEST_TIMEOUT_SEC
+    source = inspect.getsource(pipeline._run_with_retries)
+    assert "RETRY_CHAIN_BUDGET_SEC" in source
+    assert "raise last" in source
