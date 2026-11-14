@@ -432,10 +432,43 @@ def _p_matrix_inverse(matrix):
     return [row[size:] for row in augmented]
 
 
+def _p_field(record, name):
+    """Read a field of a user-type record (Pine ``point.field``).
+
+    Returns ``na`` when the record is missing or the field is not declared, so a
+    typo in the field list surfaces as a missing value rather than an exception
+    in the middle of a backtest.
+    """
+    if isinstance(record, dict):
+        return record.get(name, float("nan"))
+    return float("nan")
+
+
+def _p_unpack(item, count):
+    """Unpack a Pine tuple loop target, padding short records with ``na``."""
+    values = item if isinstance(item, (tuple, list)) else [item]
+    output = list(values[:count])
+    while len(output) < count:
+        output.append(float("nan"))
+    return output
+
+
+def _p_map_key(key):
+    """Collapse a Pine map key to a hashable scalar.
+
+    ``map.put(m, y * 100 + month, ...)`` builds its key from series, so the key
+    arrives as a Series and a dict refuses it as an unhashable key. Pine keys
+    are values of the current bar, same as the values stored against them.
+    """
+    if key is None or isinstance(key, (str, int, float, bool)):
+        return key
+    return _p_last(key)
+
+
 def _p_map_put(mapping, key, value):
     """Store a map entry, collapsing a series to this bar."""
     if isinstance(mapping, dict):
-        mapping[key] = _p_last(value)
+        mapping[_p_map_key(key)] = _p_last(value)
     return value
 
 
@@ -447,17 +480,31 @@ def _p_map_get(mapping, key, default=None):
     """
     if not isinstance(mapping, dict):
         return float("nan") if default is None else default
-    return mapping.get(key, float("nan") if default is None else default)
+    return mapping.get(_p_map_key(key), float("nan") if default is None else default)
 
 
 def _p_map_contains(mapping, key):
-    return bool(isinstance(mapping, dict) and key in mapping)
+    return bool(isinstance(mapping, dict) and _p_map_key(key) in mapping)
 
 
 def _p_map_remove(mapping, key):
     if not isinstance(mapping, dict):
         return float("nan")
-    return mapping.pop(key, float("nan"))
+    return mapping.pop(_p_map_key(key), float("nan"))
+
+
+def _p_map_keys(mapping):
+    """Pine ``map.keys``: the keys as an array, empty when the map is ``na``."""
+    if not isinstance(mapping, dict):
+        return []
+    return list(mapping.keys())
+
+
+def _p_map_values(mapping):
+    """Pine ``map.values``: the values as an array, empty when ``na``."""
+    if not isinstance(mapping, dict):
+        return []
+    return list(mapping.values())
 
 
 def _p_map_size(mapping):
@@ -720,6 +767,52 @@ def _p_str_fill(pattern, *values):
 def _p_str_length(value):
     """Pine ``str.length``; ``na`` counts as an empty string."""
     return len(_p_str(value))
+
+
+def _p_str_tonumber(value):
+    """Pine ``str.tonumber``: parse a numeric prefix, ``na`` when unparsable.
+
+    The generated module may not import ``re`` (the sandbox allow-list is
+    numpy/pandas/math/json), so the numeric prefix is collected by hand. Pine
+    returns ``na`` rather than raising, and a timeframe input is a plain string
+    like ``"15"`` or ``"1D"`` that callers test with ``na()``.
+    """
+    text = _p_str(value).strip()
+    if not text:
+        return float("nan")
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        pass
+    allowed = set("0123456789+-.eE")
+    prefix = ""
+    for index, character in enumerate(text):
+        if character not in allowed:
+            break
+        if index and character in "+-" and text[index - 1] not in "eE":
+            break
+        prefix += character
+    try:
+        return float(prefix)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def _p_str_split(value, separator=None):
+    """Pine ``str.split``: ``na`` separator splits on whitespace."""
+    text = _p_str(value)
+    if separator is None or separator == "":
+        return text.split()
+    return text.split(_p_str(separator))
+
+
+def _p_str_replace(value, needle, replacement):
+    """Pine ``str.replace``: ``na`` needle or replacement is a no-op."""
+    text = _p_str(value)
+    target = _p_str(needle)
+    if not target:
+        return text
+    return text.replace(target, _p_str(replacement))
 
 
 def _p_str_upper(value):
@@ -1045,10 +1138,16 @@ def _p_valuewhen(condition, source, occurrence=0):
 
 
 def _p_pivothigh(series, leftbars, rightbars):
+    '''Pine ta.pivothigh; a scalar source has no neighbourhood, so na.
+
+    Scripts feed indicator outputs here (ta.pivothigh(macdLine, l, r)) and an
+    indicator that degraded to a scalar used to raise the numpy.float64
+    has-no-attribute-to_numpy error from inside a helper it never mentioned.
+    '''
     left = _p_window(leftbars)
     right = _p_window(rightbars)
     span = left + right + 1
-    values = series.to_numpy()
+    series = _p_as_series(series)
 
     def _value(window_values):
         candidate = window_values[left]
@@ -1058,15 +1157,15 @@ def _p_pivothigh(series, leftbars, rightbars):
             return np.nan
         return float(candidate)
 
-    pivots = series.rolling(span, min_periods=span).apply(_value, raw=True)
-    del values
-    return pivots.shift(-right).fillna(np.nan)
+    return series.rolling(span, min_periods=span).apply(_value, raw=True).shift(-right)
 
 
 def _p_pivotlow(series, leftbars, rightbars):
+    '''Pine ta.pivotlow; mirrors ta.pivothigh above.'''
     left = _p_window(leftbars)
     right = _p_window(rightbars)
     span = left + right + 1
+    series = _p_as_series(series)
 
     def _value(window_values):
         candidate = window_values[left]
@@ -1852,17 +1951,21 @@ def _p_array_clear(values):
 
 
 def _p_array_index(values, value):
+    """Pine ``array.indexof``: compare this bar's value, never a whole series."""
     if not isinstance(values, (list, tuple)):
         return -1
+    probe = _p_last(value)
     for position, item in enumerate(values):
-        if item == value:
+        if item == probe:
             return position
     return -1
 
 
 def _p_array_lastindex(values, value):
+    """Pine ``array.lastindexof``; mirrors ``array.indexof`` above."""
+    probe = _p_last(value)
     for position in range(len(values) - 1, -1, -1):
-        if values[position] == value:
+        if values[position] == probe:
             return position
     return -1
 
@@ -1917,10 +2020,36 @@ def _p_array_copy(values):
     return [item for item in values]
 
 
+def _p_sort_key(item):
+    """Order user-type records by their first numeric field, else by identity.
+
+    Pine sorts numbers and strings. A script that stores ``Type.new(...)``
+    records in an array and sorts it relies on a field ordering the transpiler
+    cannot see, so fall back to the first numeric field — and to a stable
+    constant when there is none, which keeps the loop running instead of raising
+    ``'<' not supported between instances of 'dict' and 'dict'``.
+    """
+    if isinstance(item, dict):
+        for value in item.values():
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, (int, float)) and value == value:
+                return float(value)
+        return 0.0
+    if isinstance(item, (int, float)):
+        return float(item)
+    if isinstance(item, str):
+        return item
+    return 0.0
+
+
 def _p_array_sort(values, order="asc"):
     items = [item for item in values]
     descending = str(order).lower().startswith("desc")
-    return sorted(items, reverse=descending)
+    try:
+        return sorted(items, reverse=descending)
+    except TypeError:
+        return sorted(items, key=_p_sort_key, reverse=descending)
 
 
 def _p_array_reverse(values):

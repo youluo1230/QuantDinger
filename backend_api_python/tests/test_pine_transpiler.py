@@ -1678,3 +1678,119 @@ def test_a_stochastic_called_with_numeric_bands_still_produces_values():
 
     bands = namespace["_p_stoch"](close, close + 1.0, close - 1.0, 14)
     assert not bands.isna().all()
+
+
+def test_a_var_inside_a_helper_does_not_capture_the_script_variable():
+    """Same identifier in two scopes is two slots, and only one is ``var``.
+
+    A helper's ``var _C`` used to own the ``_C`` slot for the whole script, so
+    the script-level ``_C = pinv(...)`` became a state write into a slot whose
+    initialiser referenced the helper's parameters. That surfaced as
+    ``name 'nrowsA' is not defined`` on a line containing neither name.
+    """
+    source = """//@version=5
+strategy("T")
+multiply(a, b, rows, cols) =>
+    var acc = array.new_float(rows * cols, 0.0)
+    array.set(acc, 0, a + b)
+    acc
+coef = multiply(close, open, 3, 2)
+basis = close + coef
+if ta.crossover(basis, close)
+    strategy.entry("Long", strategy.long)
+"""
+    result = transpile_pine(source, symbol="BTC/USDT", timeframe="1h", name="T")
+
+    assert result.ok, result.error
+    # The script-level assignment must bind a local, not reach for the helper's
+    # slot — and the helper's slot must not leak its parameter names upward.
+    assert 'basis = (close_series + coef)' in result.code or "basis = " in result.code
+    assert "float('nan')" not in result.code.split("_STATE = ")[1].split("\n")[0]
+
+
+def test_a_var_initialiser_may_refer_to_a_later_var():
+    """Declaration order must not desync a slot's initialiser.
+
+    ``var a = array.new_int(n, 0)`` refers to ``var n = 20`` written above it in
+    the script, but pre-declaration used to walk the body in reverse, so ``n``
+    was not registered yet and its read became the bare name ``n`` — a NameError
+    reported against a line that reads perfectly well.
+    """
+    source = """//@version=5
+strategy("T")
+var int limit = 20
+var buf = array.new_int(limit, 0)
+array.set(buf, 0, bar_index)
+if ta.crossover(close, ta.sma(close, limit))
+    strategy.entry("Long", strategy.long)
+"""
+    result = transpile_pine(source, symbol="BTC/USDT", timeframe="1h", name="T")
+
+    assert result.ok, result.error
+    # Neither slot may be referenced as a bare Python name.
+    assert "array.new_int(limit, 0)" not in result.code
+    assert '_state_get("limit_v", 20)' in result.code
+
+
+def test_a_method_on_a_call_result_still_receives_its_receiver():
+    """``source.f(length).bands()`` must pass ``source`` to the method.
+
+    The owner of that call is itself a call, so the dispatch cannot name it and
+    the method body's first parameter went unfilled — a TypeError raised inside
+    generated code the author cannot see.
+    """
+    source = """//@version=5
+strategy("T")
+method bands(float src) =>
+    src * 2.0
+lp(series, length) =>
+    ta.ema(series, length)
+upper = lp(close, 3).bands()
+if ta.crossover(close, upper)
+    strategy.entry("Long", strategy.long)
+"""
+    result = transpile_pine(source, symbol="BTC/USDT", timeframe="1h", name="T")
+
+    assert result.ok, result.error
+    call_sites = [
+        line.strip()
+        for line in result.code.splitlines()
+        if "v_fn_bands(" in line and "def " not in line
+    ]
+    assert call_sites, result.code
+    assert "v_fn_bands(v_fn_lp(close_series, 3))" in call_sites[0]
+
+
+def test_a_function_that_reads_its_own_previous_value_still_runs():
+    """A self-referencing local inside a function must be bound first.
+
+    Pine lets a function body both write ``_direction`` and read ``_direction[1]``
+    on the same line; Python would raise UnboundLocalError on the first bar.
+    """
+    source = """
+//@version=5
+strategy("zigzag", overlay=true)
+
+zigzag() =>
+    _direction = _isUp[1] and _isDown ? -1 : _isDown[1] and _isUp ? 1 : nz(_direction[1])
+    _direction
+
+_isUp = close > open
+_isDown = close < open
+_direction = zigzag()
+if _direction == 1
+    strategy.entry("long", strategy.long)
+if _direction == -1
+    strategy.entry("short", strategy.short)
+"""
+
+    result = transpile_pine(source)
+
+    assert result.ok, result.blockers
+    lines = result.code.splitlines()
+    body_at = next(
+        index for index, line in enumerate(lines)
+        if line.strip().startswith("def v_fn_zigzag(")
+    )
+    assert lines[body_at + 1].strip() == "direction = float('nan')"
+    assert "_p_nz(_p_shift(direction, 1))" in lines[body_at + 2]

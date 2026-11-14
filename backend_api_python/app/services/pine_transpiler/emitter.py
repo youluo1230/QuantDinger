@@ -99,7 +99,7 @@ class Emitter:
         #: Every Python local the generated handler binds.
         self.local_names: set[str] = set()
         #: Pine identifier -> state key for ``var`` persistence.
-        self.state_keys: dict[str, str] = {}
+        self.state_keys: dict[tuple[str, str], str] = {}
         self.param_lines: list[str] = []
         self.constants: dict[str, str] = {}
         self.library_aliases: set[str] = set()
@@ -327,9 +327,11 @@ class Emitter:
         """
         if not body:
             return []
+        lines = [f"    {name} = float('nan')" for name in self._function_prebindings(body)]
         tail = body[-1]
         head = body[:-1]
-        lines = self._emit_block(head, depth=1) if head else []
+        if head:
+            lines.extend(self._emit_block(head, depth=1))
         value = getattr(tail, "value", None) if is_node(tail, "Expr") else None
         if value is not None and node_name(value) not in {"If", "While", "ForTo", "ForIn", "Switch"}:
             rendered = self._expr(value)
@@ -339,6 +341,41 @@ class Emitter:
                 return [*lines, "    return float('nan')"]
         tail_lines = self._emit_statement(tail, depth=1, top_level=False)
         return [*lines, *tail_lines]
+
+    def _function_prebindings(self, body: list[Any]) -> list[str]:
+        """Names a translated Pine function has to bind before its first read.
+
+        A Pine function that writes a value on one bar and reads ``x[1]`` on the
+        next is describing a series, and inside a function that series is still
+        per-symbol history. Python has no such thing: ``x = ... x[1] ...`` reads a
+        name that is not bound yet on the first bar, and an assignment made on
+        only one branch of an ``if`` leaves the other path unbound. Both surface
+        as ``UnboundLocalError`` in the middle of a backtest.
+
+        Only names written somewhere in this function are bound, and only when
+        the write is conditional or reads the name it is writing. A name that is
+        merely read comes from the enclosing script scope and must not be
+        shadowed here.
+        """
+        params = set()
+        found: list[str] = []
+        seen: set[str] = set()
+        for current, level in _walk_with_levels(body):
+            if not is_node(current, "Assign"):
+                continue
+            target = getattr(current, "target", None)
+            if not is_node(target, "Name"):
+                continue
+            name = str(getattr(target, "id", "") or "")
+            if not name or name in seen:
+                continue
+            if self.has_state(name):
+                continue
+            value = getattr(current, "value", None)
+            if level or _mentions(value, name):
+                seen.add(name)
+                found.append(self.py_name(name))
+        return found
 
     def _close_function_body(self, lines: list[str]) -> list[str]:
         """Ensure a translated Pine function has a body and a return."""
@@ -368,37 +405,53 @@ class Emitter:
         is how a strategy ends up with zero trades while every intermediate
         variable looks computed.
         """
-        stack: list[tuple[Any, int]] = [(item, 0) for item in body]
-        while stack:
-            current, level = stack.pop()
-            if is_node(current, "FunctionDef"):
+        declarations = [item for item in _walk_with_levels(body)]
+        # Two passes. Slot names must all exist before any initialiser is
+        # rendered, because an initialiser often refers to another ``var``
+        # (``array.new_int(maxarraysize, 0)``). Rendering in a single pass turned
+        # that reference into a bare name whenever the other declaration came
+        # later in traversal order — a NameError inside a helper the author never
+        # wrote.
+        for current, level in declarations:
+            if not is_node(current, "Assign"):
                 continue
-            if is_node(current, "Assign"):
-                target = getattr(current, "target", None)
-                if is_node(target, "Tuple"):
-                    for item in getattr(target, "elts", []) or []:
-                        if is_node(item, "Name"):
-                            name = str(getattr(item, "id", "") or "")
-                            if name:
-                                self.pending_names.setdefault(name, "")
-                if is_node(target, "Name"):
-                    name = str(getattr(target, "id", "") or "")
-                    if name:
-                        if node_name(getattr(current, "mode", None)) in {"Var", "VarIp"}:
-                            key = self.state_key(name)
-                            if not level and key not in self.state_init:
-                                self.state_init[key] = self._expr(
-                                    getattr(current, "value", None)
-                                ) or "float('nan')"
-                        else:
-                            # Pine assignments made inside a branch stay visible
-                            # afterwards; Python locals would not exist on the
-                            # path where the branch is skipped, so bind a slot
-                            # up front and let the branch fill it in.
-                            key = name if level else ""
-                            if key:
-                                self.pending_names.setdefault(key, "")
-            stack.extend((child, level + 1) for child in children(current))
+            target = getattr(current, "target", None)
+            if is_node(target, "Tuple"):
+                for item in getattr(target, "elts", []) or []:
+                    if is_node(item, "Name"):
+                        name = str(getattr(item, "id", "") or "")
+                        if name:
+                            self.pending_names.setdefault(name, "")
+                continue
+            if not is_node(target, "Name"):
+                continue
+            name = str(getattr(target, "id", "") or "")
+            if not name:
+                continue
+            if node_name(getattr(current, "mode", None)) in {"Var", "VarIp"}:
+                self.state_key(name)
+            elif level:
+                # Pine assignments made inside a branch stay visible afterwards;
+                # Python locals would not exist on the path where the branch is
+                # skipped, so bind a slot up front and let the branch fill it in.
+                self.pending_names.setdefault(name, "")
+
+        for current, level in declarations:
+            if not is_node(current, "Assign") or level:
+                continue
+            if node_name(getattr(current, "mode", None)) not in {"Var", "VarIp"}:
+                continue
+            target = getattr(current, "target", None)
+            if not is_node(target, "Name"):
+                continue
+            name = str(getattr(target, "id", "") or "")
+            if not name:
+                continue
+            key = self.state_key(name)
+            if key not in self.state_init:
+                self.state_init[key] = self._expr(
+                    getattr(current, "value", None)
+                ) or "float('nan')"
 
     def _build_predeclarations(self) -> None:
         """Emit neutral bindings for names assigned only inside a branch.
@@ -410,7 +463,7 @@ class Emitter:
         """
         self.predeclared = []
         for name in sorted(self.pending_names):
-            if name in self.state_keys:
+            if self.has_state(name):
                 continue
             python_name = self.py_name(name)
             if python_name in self.local_names:
@@ -513,9 +566,22 @@ class Emitter:
         """Report whether a Pine identifier currently holds a series."""
         return pine_name in self.series_names or pine_name in mapping.SERIES_NAMES
 
+    def _scoped(self, pine_name: str) -> tuple[str, str]:
+        """Return the ``(scope, identifier)`` a ``var`` belongs to.
+
+        Pine ``var`` lives inside the function that declares it. Keying the slot
+        table on the bare identifier let a ``var _C`` inside a helper capture
+        every later ``_C`` in the script, so a script-level assignment moved into
+        the helper's slot and inherited an initialiser that referenced the
+        helper's parameters — ``name 'nrowsA' is not defined`` reported against a
+        line that never mentions it.
+        """
+        return (self._func_name or "", pine_name)
+
     def state_key(self, pine_name: str) -> str:
         """Return the ``_STATE`` key used to persist a Pine ``var``."""
-        key = self.state_keys.get(pine_name)
+        scoped = self._scoped(pine_name)
+        key = self.state_keys.get(scoped)
         if key is not None:
             return key
         base = re.sub(r"[^0-9A-Za-z_]", "_", pine_name).strip("_") or "value"
@@ -527,8 +593,30 @@ class Emitter:
         while key in used:
             key = f"{base}_v{suffix}"
             suffix += 1
-        self.state_keys[pine_name] = key
+        self.state_keys[scoped] = key
         return key
+
+    def has_state(self, pine_name: str) -> bool:
+        """Report whether ``pine_name`` names a ``var`` visible from here.
+
+        A function body may read and write script-level ``var`` slots; only a
+        ``var`` declared inside the function shadows them. Falling back to the
+        script scope keeps that relationship while stopping a helper's local
+        ``var`` from capturing the same identifier in the script body.
+        """
+        scoped = self._scoped(pine_name)
+        if scoped in self.state_keys:
+            return True
+        global_scope = ("", pine_name)
+        return scoped != global_scope and global_scope in self.state_keys
+
+    def state_of(self, pine_name: str) -> str:
+        """Return the slot key of a ``var`` visible from here."""
+        scoped = self._scoped(pine_name)
+        key = self.state_keys.get(scoped)
+        if key is not None:
+            return key
+        return self.state_keys.get(("", pine_name), "")
 
     def history_key(self, pine_name: str) -> str:
         """Return the ``_HISTORY`` key used for Pine ``[n]`` indexing."""
@@ -1030,12 +1118,12 @@ class Emitter:
         rendered = self._expr(value)
         if not pine_name or rendered == "":
             return []
-        if pine_name in self.state_keys:
+        if self.has_state(pine_name):
             self.stats["uses_var"] = True
             self.series_names.discard(pine_name)
             if self._expr_is_series(value):
                 self.series_names.add(pine_name)
-            return [f"{indent}_state_set(\"{self.state_keys[pine_name]}\", {rendered})"]
+            return [f"{indent}_state_set(\"{self.state_of(pine_name)}\", {rendered})"]
         py = self.py_name(pine_name)
         self.local_names.add(py)
         if self._expr_is_series(value):
@@ -1055,8 +1143,8 @@ class Emitter:
         rendered = self._expr(value)
         if not pine_name or operator is None or rendered == "":
             return []
-        if pine_name in self.state_keys:
-            key = self.state_keys[pine_name]
+        if self.has_state(pine_name):
+            key = self.state_of(pine_name)
             fallback = self.state_init.get(key, "0.0")
             current = f"_state_get(\"{key}\", {fallback})"
             self.stats["uses_var"] = True
@@ -1161,7 +1249,25 @@ class Emitter:
             # Nothing to iterate over, but the body must still stay a block.
             return [f"{indent}if True:", *body]
         self._register_helper("_p_iter")
-        return [f"{indent}for {py} in _p_iter({iterator}):", *body]
+        destructure = ""
+        if is_node(target, "Tuple"):
+            names = [
+                self.py_name(str(getattr(item, "id", "") or ""))
+                for item in getattr(target, "elts", []) or []
+                if is_node(item, "Name") and str(getattr(item, "id", "") or "")
+            ]
+            if names:
+                # ``for [index, coord] in pivots`` keeps its names usable inside
+                # the body; without this the body referenced ``index`` directly
+                # and died with NameError on a name the author had bound.
+                self._register_helper("_p_unpack")
+                joined = ", ".join(names)
+                destructure = f"{indent}    {joined} = _p_unpack({py}, {len(names)})"
+        lines = [f"{indent}for {py} in _p_iter({iterator}):"]
+        if destructure:
+            lines.append(destructure)
+        lines.extend(body)
+        return lines
 
     def _emit_switch(self, node: Any, indent: str, depth: int) -> list[str]:
         """Translate ``switch`` into an ``if``/``elif`` chain."""
@@ -1402,14 +1508,18 @@ class Emitter:
             return "True"
         if name in {"false", "False"}:
             return "False"
-        constant = self._static_constant(name)
-        if constant is not None:
-            return constant
+        # A ``var`` the script declares shadows a same-named builtin: ``period``
+        # is a legacy alias for the chart timeframe, and a script that writes
+        # ``var float period = 0.0`` means its own variable, not "4h".
+        if self.has_state(name):
+            key = self.state_of(name)
+            return f"_state_get(\"{key}\", {self.state_init.get(key, 'float(\'nan\')')})"
+        if name not in self.names:
+            constant = self._static_constant(name)
+            if constant is not None:
+                return constant
         if name in self.constants:
             return self.constants[name]
-        if name in self.state_keys:
-            key = self.state_keys[name]
-            return f"_state_get(\"{key}\", {self.state_init.get(key, 'float(\'nan\')')})"
         if name in mapping.SOFT_CONSTANTS and name not in self.names:
             for helper in re.findall(r"_p_[A-Za-z0-9_]+", mapping.SOFT_CONSTANTS[name]):
                 self._register_helper(helper)
@@ -1442,7 +1552,15 @@ class Emitter:
                 return "float('nan')"
             self._warn_once(f"attribute_dropped:{dotted}")
             return "float('nan')"
-        return self._expr(getattr(node, "value", None))
+        value = getattr(node, "value", None)
+        rendered = self._expr(value)
+        attribute = str(getattr(node, "attr", "") or "")
+        if attribute and rendered and is_node(value, "Call"):
+            # ``array.get(zones, i).mid`` reads a user-type field off a call
+            # result; dropping the attribute compared the whole record.
+            self._register_helper("_p_field")
+            return f"_p_field({rendered}, '{attribute}')"
+        return rendered
 
     def _history_offset(self, node: Any) -> str:
         """Return the rendered ``[n]`` offset of a history reference, if any.
@@ -1772,7 +1890,12 @@ class Emitter:
         if owner and name == "new" and owner in self.user_types:
             return self._object_new(owner, node)
         if name in self.functions and not owner:
-            return self._user_function(name, node)
+            # ``source.lp_filter(len).bands()`` has a call for a receiver, so
+            # ``_call_parts`` cannot name an owner and the dispatch lands here.
+            # A ``method`` declared with ``method bands(float src) =>`` still
+            # expects that receiver as its first argument; dropping it produced
+            # ``v_fn_bands() missing 1 required positional argument: 'src'``.
+            return self._user_function(name, node, receiver=self._call_receiver(node))
         if owner in self.library_aliases:
             return self._library_call(owner, name, node)
         if owner:
@@ -2207,10 +2330,27 @@ class Emitter:
             return f"{target}()"
         return f"{target}({', '.join(arguments)})"
 
-    def _user_function(self, name: str, node: Any) -> str:
+    def _call_receiver(self, node: Any) -> str:
+        """Return the rendered receiver of a call whose owner is not a name.
+
+        ``base.method(...)`` where ``base`` is itself a call or a member chain
+        keeps its receiver in the callee expression rather than in the argument
+        list, which is where a ``method`` declaration expects it.
+        """
+        func = getattr(node, "func", None)
+        if not is_node(func, "Attribute"):
+            return ""
+        owner = getattr(func, "value", None)
+        if is_node(owner, "Name"):
+            return ""
+        return self._expr(owner)
+
+    def _user_function(self, name: str, node: Any, receiver: str = "") -> str:
         """Render a call to a translated Pine user function."""
         arguments = [self._expr(item) for item in self._positional(node)]
         arguments = [item for item in arguments if item]
+        if receiver and name in self.function_methods:
+            arguments = [receiver, *arguments]
         return f"{LOCAL_PREFIX}fn_{name}({', '.join(arguments)})"
 
     # -- parameters -----------------------------------------------------------
@@ -2519,6 +2659,36 @@ def _literal_source(value: Any) -> str:
     if isinstance(value, (int, float)):
         return repr(value)
     return "0.0"
+
+
+def _mentions(node: Any, name: str) -> bool:
+    """True when the subtree reads the identifier ``name``."""
+    if node is None:
+        return False
+    if is_node(node, "Name") and str(getattr(node, "id", "") or "") == name:
+        return True
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        for child in children(current):
+            if is_node(child, "Name") and str(getattr(child, "id", "") or "") == name:
+                return True
+            stack.append(child)
+    return False
+
+
+def _walk_with_levels(body: list[Any]) -> "list[tuple[Any, int]]":
+    """Flatten ``body`` depth-first, tagging each node with its nesting level."""
+    out: list[tuple[Any, int]] = []
+    stack: list[tuple[Any, int]] = [(item, 0) for item in reversed(body)]
+    while stack:
+        current, level = stack.pop()
+        out.append((current, level))
+        if is_node(current, "FunctionDef"):
+            continue
+        nested = [(child, level + 1) for child in children(current)]
+        stack.extend(reversed(nested))
+    return out
 
 
 def _is_literal_expression(expression: str) -> bool:

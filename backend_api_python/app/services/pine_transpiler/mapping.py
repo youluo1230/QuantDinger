@@ -529,6 +529,9 @@ STRING_CALLS: Final[dict[str, str]] = {
     "str.upper": "_p_str_upper",
     "str.lower": "_p_str_lower",
     "str.contains": "_p_str_contains",
+    "str.tonumber": "_p_str_tonumber",
+    "str.split": "_p_str_split",
+    "str.replace": "_p_str_replace",
 }
 
 #: ``array.*`` calls mapped onto the emitted list helpers.
@@ -598,6 +601,11 @@ MAP_CALLS: Final[dict[str, str]] = {
     "map.contains": "_p_map_contains",
     "map.remove": "_p_map_remove",
     "map.size": "_p_map_size",
+    "map.keys": "_p_map_keys",
+    "map.values": "_p_map_values",
+    # ``object.keys()`` and ``object.values()`` on a map reach the same helpers.
+    "keys": "_p_map_keys",
+    "values": "_p_map_values",
 }
 
 #: ``array.*`` statistics that route through the generic reducer.
