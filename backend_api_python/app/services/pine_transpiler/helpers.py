@@ -107,6 +107,50 @@ def _p_shift(value, count):
     return value
 
 
+#: Chart series collected while an indicator replays, keyed by plot slot.
+_QD_CHART: dict = {}
+
+
+def _p_chart_push(key, value):
+    """Record one bar of a chart series and hand the value back unchanged.
+
+    An indicator's statements run once per bar, so a ``plot`` call is also a
+    per-bar event: this appends the bar's value and returns it so the statement
+    that produced it can carry on as if nothing happened. Values that are ``na``
+    are stored as ``None`` because JSON has no NaN, and the chart treats a
+    ``None`` as a gap rather than as a price of zero.
+    """
+    slot = _QD_CHART.get(key)
+    if slot is None:
+        slot = []
+        _QD_CHART[key] = slot
+    if hasattr(value, "iloc"):
+        value = value.iloc[-1] if len(value) else float("nan")
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = float("nan")
+    slot.append(None if number != number else number)
+    return value
+
+
+def _p_chart_mark(key, condition):
+    """Record whether a ``plotshape``/``plotchar`` condition fired this bar."""
+    slot = _QD_CHART.get(key)
+    if slot is None:
+        slot = []
+        _QD_CHART[key] = slot
+    if hasattr(condition, "iloc"):
+        condition = condition.iloc[-1] if len(condition) else False
+    try:
+        number = float(condition)
+        fired = number == number and number != 0.0
+    except (TypeError, ValueError):
+        fired = bool(condition)
+    slot.append(True if fired else None)
+    return condition
+
+
 def _p_last(value):
     if hasattr(value, "iloc"):
         return value.iloc[-1] if len(value) else float("nan")

@@ -70,6 +70,7 @@ celery_app.conf.update(
         "quantdinger.tasks.tradingview_assess": {"queue": "maintenance"},
         "quantdinger.tasks.tradingview_convert": {"queue": "maintenance"},
         "quantdinger.tasks.tradingview_verify": {"queue": "maintenance"},
+        "quantdinger.tasks.tradingview_indicators": {"queue": "maintenance"},
     },
     beat_schedule={
         "fundamental-sync": {
@@ -129,6 +130,13 @@ celery_app.conf.update(
             "task": "quantdinger.tasks.tradingview_verify",
             "schedule": max(
                 3600, int(os.getenv("TRADINGVIEW_VERIFY_INTERVAL_SEC", "86400"))
+            ),
+        },
+        "tradingview-indicators": {
+            "task": "quantdinger.tasks.tradingview_indicators",
+            "schedule": max(
+                3600,
+                int(os.getenv("TRADINGVIEW_INDICATOR_INTERVAL_SEC", "86400")),
             ),
         },
         # Candle-store retention. Off unless the layer is on, because a

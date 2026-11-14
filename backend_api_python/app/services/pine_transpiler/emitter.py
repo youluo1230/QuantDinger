@@ -146,6 +146,17 @@ class Emitter:
         self.entry_style = "none"
         #: Whether drawing/alert conditions may be lowered into orders.
         self.signal_orders_enabled = True
+        #: Whether ``plot*`` calls are collected as chart series instead of being
+        #: dropped. An indicator's whole purpose is the line it draws, so the
+        #: chart assembler turns this on; the strategy assembler leaves it off.
+        self.chart_mode = False
+        #: Collected chart series, in source order. Each entry is a dict with
+        #: ``title``, ``store`` (the generated buffer name) and ``style``/``color``.
+        self.chart_plots: list[dict[str, Any]] = []
+        #: Collected chart markers (``plotshape``/``plotchar``), same shape.
+        self.chart_signals: list[dict[str, Any]] = []
+        #: Whether the ``indicator(...)`` declaration asked to draw over price.
+        self._overlay_declared = False
         #: Translated Pine user functions, in source order.
         self.function_blocks: list[list[str]] = []
         #: Name of the Pine function currently being translated, if any.
@@ -179,7 +190,10 @@ class Emitter:
         # the very same conditions for the chart. Lowering those plots into
         # orders as well would place every trade twice, so signal lowering is
         # only enabled for scripts that never call ``strategy.entry``.
-        self.signal_orders_enabled = not self._script_places_orders(tree)
+        if not self.chart_mode:
+            # The chart assembler turns this off before calling in: an indicator
+            # never trades, so a drawing condition must not become an order.
+            self.signal_orders_enabled = not self._script_places_orders(tree)
         self._collect_declarations(script_body)
         self._predeclare_state(script_body)
         self._build_predeclarations()
@@ -191,6 +205,17 @@ class Emitter:
         if self.entry_style == "none":
             self.blockers.append("no_entry_signal")
         self.stats["emitted_statements"] = len(statements)
+        if self.chart_mode:
+            # A script that draws nothing tells the reader nothing: leaving the
+            # plots empty would produce an indicator pane with no lines, which
+            # looks identical to a broken conversion.
+            if not self.chart_plots and not self.chart_signals:
+                if "no_chart_output" not in self.blockers:
+                    self.blockers.append("no_chart_output")
+            # Drawing is the output, so the trading-shaped blockers do not apply.
+            for blocker in ("no_strategy_entry", "no_entry_signal"):
+                if blocker in self.blockers:
+                    self.blockers.remove(blocker)
         return {
             "statements": statements,
             "function_blocks": [block for block in self.function_blocks if block],
@@ -204,6 +229,8 @@ class Emitter:
             "local_names": sorted(self.local_names),
             "predeclared": list(self.predeclared),
             "param_lines": list(self.param_lines),
+            "chart_plots": [dict(item) for item in self.chart_plots],
+            "chart_signals": [dict(item) for item in self.chart_signals],
         }
 
     # -- preprocessing --------------------------------------------------------
@@ -756,6 +783,10 @@ class Emitter:
         self._check_blocked(dotted_name)
         if not owner and name in mapping.DECLARATION_CALLS:
             return []
+        if self.chart_mode and not owner and name in mapping.PLOT_CALLS:
+            # Collecting the line is the whole point of an indicator; a strategy
+            # has nothing to draw on, which is why the default drops it.
+            return self._emit_chart_plot(name, node, indent)
         if name in mapping.SIGNAL_CALLS and self.signal_orders_enabled:
             # An indicator has no ``strategy.*`` namespace, so its only per-bar
             # condition is the one inside a drawing or alert call. That condition
@@ -921,6 +952,80 @@ class Emitter:
             f"{indent}if {self._wrap_condition(condition)}:",
             f"{indent}    order_target_percent(_SYMBOL, {target}, reason=\"{reason}\")",
         ]
+
+    def _emit_chart_plot(self, name: str, node: Any, indent: str) -> list[str]:
+        """Collect a ``plot``/``plotshape``/``plotchar`` call as a chart series.
+
+        The value is pushed into the slot for this call site and handed straight
+        back, so the surrounding statement still evaluates exactly as written.
+        ``plotshape``/``plotchar`` carry a condition rather than a line, so they
+        become sparse markers instead of a continuous series -- that is the
+        difference the chart reader sees between a band and a dot.
+        """
+        positional = self._positional(node)
+        if not positional:
+            self._warn_once(f"plot_without_value:{name}")
+            return []
+        arguments = self._call_arguments(node)
+        title = self._signal_title(node)
+        if not title:
+            literal = self._literal_value(arguments.get("title"))
+            if isinstance(literal, str):
+                title = literal
+        style = self._literal_value(arguments.get("style"))
+        style_name = str(style) if isinstance(style, str) else ""
+        colour = self._plot_colour(arguments.get("color"))
+        expression = self._expr(positional[0])
+        if not expression:
+            self._warn_once(f"plot_without_value:{name}")
+            return []
+
+        key = f"plot_{self._counter}"
+        self._counter += 1
+        self._register_helper("_p_chart_push")
+        self._register_helper("_p_chart_mark")
+        if name == "plot":
+            self.chart_plots.append({
+                "key": key,
+                "title": title or f"Plot {len(self.chart_plots) + 1}",
+                "style": mapping.PLOT_STYLE_TYPES.get(style_name, "line"),
+                "color": colour,
+                "overlay": bool(self._overlay_hint()),
+            })
+            return [f'{indent}_p_chart_push("{key}", {expression})']
+
+        # ``plotshape``/``plotchar``: the condition decides whether the marker
+        # exists on this bar at all.
+        self.chart_signals.append({
+            "key": key,
+            "title": title or f"Signal {len(self.chart_signals) + 1}",
+            "color": colour,
+            "long": self._signal_is_long(title),
+            "overlay": True,
+        })
+        return [f'{indent}_p_chart_mark("{key}", {expression})']
+
+    def _plot_colour(self, node: Any) -> str:
+        """Render a plot colour as a hex string the chart contract accepts."""
+        if node is None:
+            return ""
+        literal = self._literal_value(node)
+        if isinstance(literal, str):
+            named = mapping.NAMED_COLOURS.get(literal)
+            if named:
+                return named
+            return literal if literal.startswith("#") else ""
+        rendered = self._expr(node)
+        # ``color.*`` calls render to a quoted name; anything else is a per-bar
+        # colour array the chart contract cannot express, so it is dropped
+        # rather than shown as a wrong solid colour.
+        if rendered.startswith(("'", '"')) and len(rendered) < 32:
+            return mapping.NAMED_COLOURS.get(rendered.strip("'\""), "")
+        return ""
+
+    def _overlay_hint(self) -> bool:
+        """Report whether this script declared itself as an overlay."""
+        return self._overlay_declared
 
     def _script_places_orders(self, tree: Any) -> bool:
         """Report whether the script already enters trades through ``strategy.*``.

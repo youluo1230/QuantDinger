@@ -149,6 +149,7 @@ ownership or shared state.
 - [Chart indicator development](trading/INDICATOR_DEV_GUIDE.md)
 - [TradingView strategy import pipeline](trading/TRADINGVIEW_PIPELINE.md)
 - [Unified market data layer](trading/MARKET_DATA_LAYER.md)
+- [Real-time chart and Pine indicator plan](trading/REALTIME_CHART_PLAN.md)
 - [Interactive Brokers](trading/IBKR_TRADING_GUIDE_EN.md)
 - Alpaca execution-fee reconciliation: [English](trading/ALPACA_FEE_RECONCILIATION.md) / [简体中文](trading/ALPACA_FEE_RECONCILIATION_CN.md)
 - [Live-trading safety](trading/LIVE_TRADING_SAFETY.md)

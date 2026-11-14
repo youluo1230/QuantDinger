@@ -127,9 +127,41 @@ def run_tradingview_verify(self):
     )
 
 
+@celery_app.task(
+    bind=True,
+    name="quantdinger.tasks.tradingview_indicators",
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_jitter=True,
+    max_retries=2,
+    soft_time_limit=3300,
+    time_limit=3600,
+)
+def run_tradingview_indicators(self):
+    """Convert and publish public TradingView indicators to the chart.
+
+    Separate from the strategy stages on purpose. A strategy earns a listing by
+    surviving a backtest; an indicator has no backtest, and its gate is that the
+    converted module runs in the chart sandbox and actually draws. Folding the
+    two into one task would mean one of them carries a gate that does not apply
+    to it.
+    """
+    del self
+    if not _enabled("TRADINGVIEW_HARVEST_ENABLED"):
+        return {"skipped": True, "reason": "disabled"}
+    from app.services.tradingview_indicators import convert_pending_indicators
+
+    return convert_pending_indicators(
+        limit=max(1, int(os.getenv("TRADINGVIEW_INDICATOR_BATCH", "40"))),
+        user_id=int(os.getenv("TRADINGVIEW_CONVERT_USER_ID", "1")),
+        publish=_enabled("TRADINGVIEW_AUTO_PUBLISH", default="true"),
+    )
+
+
 __all__ = [
     "run_tradingview_assess",
     "run_tradingview_convert",
     "run_tradingview_harvest",
+    "run_tradingview_indicators",
     "run_tradingview_verify",
 ]

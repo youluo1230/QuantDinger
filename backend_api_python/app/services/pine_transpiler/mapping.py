@@ -648,6 +648,52 @@ SIGNAL_CALLS: Final[frozenset[str]] = frozenset(
     {"plotshape", "plotchar", "alertcondition"}
 )
 
+#: Calls that produce a drawable line on a chart. The strategy emitter drops
+#: them because a backtest has nothing to draw on; the indicator emitter collects
+#: them instead, since a line is the only thing an indicator is.
+PLOT_CALLS: Final[frozenset[str]] = frozenset({"plot", "plotshape", "plotchar"})
+
+#: Plot styles the chart contract can express. Pine's ``style_line``,
+#: ``style_stepline`` and friends all reduce to a line; ``style_columns`` becomes
+#: bar, ``style_circles`` becomes circle and ``style_area`` becomes cloud, which
+#: is the closest shape a filled band maps onto.
+PLOT_STYLE_TYPES: Final[dict[str, str]] = {
+    "style_line": "line",
+    "style_linebr": "line",
+    "style_stepline": "line",
+    "style_stepline_diamond": "line",
+    "style_dashed": "line",
+    "style_dotted": "line",
+    "style_circles": "circle",
+    "style_cross": "circle",
+    "style_columns": "bar",
+    "style_area": "cloud",
+    "style_areabr": "cloud",
+    "style_histogram": "bar",
+}
+
+#: Named Pine colours as hex, because the chart contract takes CSS colours and a
+#: reader who wrote ``color.green`` expects green rather than the default.
+NAMED_COLOURS: Final[dict[str, str]] = {
+    "aqua": "#00BCD4",
+    "black": "#000000",
+    "blue": "#2196F3",
+    "fuchsia": "#E040FB",
+    "gray": "#9E9E9E",
+    "green": "#4CAF50",
+    "lime": "#CDDC39",
+    "maroon": "#795548",
+    "navy": "#1A237E",
+    "olive": "#827717",
+    "orange": "#FF9800",
+    "purple": "#9C27B0",
+    "red": "#F44336",
+    "silver": "#B0BEC5",
+    "teal": "#009688",
+    "white": "#FFFFFF",
+    "yellow": "#FFEB3B",
+}
+
 #: Words in a signal title that mark it as a long or a short trigger. TradingView
 #: authors label alert conditions ("Bullish order block formed", "CHoCH Bear")
 #: rather than marking them structurally, so the title is the only direction

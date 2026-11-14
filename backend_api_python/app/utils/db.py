@@ -428,6 +428,12 @@ def _apply_init_sql(logger, *, strict: bool = False):
             _apply_migration_component(
                 conn,
                 logger,
+                name="tv-indicators-20261115",
+                path=Path(__file__).resolve().parent.parent.parent / "migrations" / "20261115_tv_indicators.sql",
+            )
+            _apply_migration_component(
+                conn,
+                logger,
                 name="market-symbols-master",
                 path=symbols_sql,
                 baseline_table="qd_market_symbols",
