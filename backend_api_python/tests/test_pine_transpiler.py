@@ -1794,3 +1794,34 @@ if _direction == -1
     )
     assert lines[body_at + 1].strip() == "direction = float('nan')"
     assert "_p_nz(_p_shift(direction, 1))" in lines[body_at + 2]
+
+
+def test_a_parameter_named_after_a_builtin_stays_inside_its_function():
+    """A helper parameter must not rename a script-level builtin.
+
+    ``get_range(rh, time) =>`` declares a parameter called ``time``. Registering
+    that name module-wide made the script body's ``time >= startDate`` compile to
+    a bare ``time``, which is not bound anywhere — a NameError from a line the
+    author wrote correctly.
+    """
+    source = """
+//@version=5
+strategy("halving", overlay=true)
+
+get_range(rh, time) =>
+    _p_and((time >= (rh - 3)), (time <= (rh + 3)))
+
+startDate = timestamp(2024, 1, 1, 0, 0)
+rh = 60000
+inRange = time >= startDate and get_range(rh, close)
+if inRange
+    strategy.entry("long", strategy.long)
+"""
+
+    result = transpile_pine(source)
+
+    assert result.ok, result.blockers
+    assert "_time" in result.code
+    body = [line for line in result.code.splitlines() if "time >= startDate" in line]
+    assert body, result.code
+    assert "(time >=" not in body[0], body[0]

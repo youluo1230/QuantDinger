@@ -111,6 +111,11 @@ class Emitter:
         self.helpers: set[str] = set()
         #: Inferred ``input.*`` parameters, name -> schema.
         self.params: dict[str, dict[str, Any]] = {}
+        #: Parameter names of the function currently being translated. Kept out
+        #: of ``names`` on purpose: that table is module-wide, so a helper that
+        #: happened to name a parameter ``time`` used to shadow the ``time``
+        #: builtin for the whole script and left the body reading a bare name.
+        self._func_params: dict[str, str] = {}
         #: Warnings collected during translation.
         self.warnings: list[str] = []
         #: Blockers collected during translation.
@@ -311,6 +316,7 @@ class Emitter:
                 lines = self._emit_function_body(body)
             finally:
                 self._func_name = ""
+                self._func_params = {}
             lines = self._close_function_body(lines)
             signature = f"def {LOCAL_PREFIX}fn_{name}({', '.join(params)}):"
             if not lines:
@@ -478,6 +484,8 @@ class Emitter:
         """
         params: list[str] = []
         optional_seen = False
+        self._func_params = {}
+        taken: set[str] = set()
         for argument in getattr(node, "args", []) or []:
             if is_node(argument, "Param"):
                 raw_name = str(getattr(argument, "name", "") or "")
@@ -489,14 +497,22 @@ class Emitter:
             default = getattr(argument, "default", None)
             if default is not None:
                 rendered = self._expr(default)
+            py = self._local_name(raw_name)
+            if py in taken:
+                suffix = 2
+                while f"{py}_{suffix}" in taken:
+                    suffix += 1
+                py = f"{py}_{suffix}"
+            taken.add(py)
+            self._func_params[raw_name] = py
             if rendered:
                 optional_seen = True
-                params.append(f"{self.py_name(raw_name)}={rendered}")
+                params.append(f"{py}={rendered}")
             elif optional_seen:
                 # Python forbids a required parameter after an optional one.
-                params.append(f"{self.py_name(raw_name)}=None")
+                params.append(f"{py}=None")
             else:
-                params.append(self.py_name(raw_name))
+                params.append(py)
         return params
 
     def _call_parts(self, node: Any) -> tuple[str, str] | None:
@@ -537,6 +553,25 @@ class Emitter:
         return ".".join(reversed(parts))
 
     # -- name handling --------------------------------------------------------
+
+    def _local_name(self, pine_name: str) -> str:
+        """Return a Python identifier for a name scoped to one function.
+
+        Deliberately does not touch ``names``: a parameter is only visible inside
+        its own function, and registering it globally let a helper's parameter
+        rename a script-level identifier or a Pine builtin of the same spelling.
+        """
+        cleaned = re.sub(r"[^0-9A-Za-z_]", "_", pine_name).strip("_") or "value"
+        if cleaned[0].isdigit():
+            cleaned = f"n_{cleaned}"
+        if (
+            cleaned in PYTHON_KEYWORDS
+            or cleaned in mapping.FORBIDDEN_IDENTIFIERS
+            or cleaned in RESERVED_IDENTIFIERS
+            or cleaned.startswith("_")
+        ):
+            cleaned = f"{LOCAL_PREFIX}{cleaned}"
+        return cleaned
 
     def py_name(self, pine_name: str) -> str:
         """Return the Python identifier that represents a Pine identifier."""
@@ -1498,6 +1533,8 @@ class Emitter:
         """Render a Pine identifier reference."""
         if not name:
             return ""
+        if self._func_name and name in self._func_params:
+            return self._func_params[name]
         if name in self.params:
             return self.py_name(name)
         if name in mapping.SERIES_NAMES:
