@@ -262,12 +262,21 @@ class IndicatorSignalAlertService:
         self.notifier = SignalNotifier()
 
     def preview_chart(self, user_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Run a user's saved indicator once and return chart-only data."""
+        """Run an indicator once and return chart-only data.
+
+        The indicator may be named by id, or supplied inline as ``code``. Inline
+        code is what makes the editor usable: an author who is still typing has
+        no saved row to point at, and requiring a save before every look at the
+        chart turns debugging into a write cycle. An inline preview is still
+        executed in the same sandbox as a saved one, so it cannot do anything a
+        saved indicator could not.
+        """
         try:
             indicator_id = int(payload.get("indicator_id") or 0)
         except (TypeError, ValueError):
             indicator_id = 0
-        if indicator_id <= 0:
+        inline_code = str(payload.get("code") or "")
+        if indicator_id <= 0 and not inline_code.strip():
             raise ValueError("indicator_id is required")
 
         market = str(payload.get("market") or "Crypto").strip() or "Crypto"
@@ -281,8 +290,20 @@ class IndicatorSignalAlertService:
             limit = 180
         params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
 
-        indicator = self._load_indicator_for_user(int(user_id), indicator_id)
-        code = str(indicator.get("runtime_code") or indicator.get("code") or "")
+        if inline_code.strip():
+            # Inline code wins over the stored row: the caller is previewing an
+            # edit that has not been saved yet, and showing the stored version
+            # instead would be answering a question nobody asked.
+            indicator = {
+                "id": indicator_id,
+                "name": str(payload.get("name") or "").strip(),
+                "code": inline_code,
+                "display_name": str(payload.get("name") or "").strip(),
+            }
+            code = inline_code
+        else:
+            indicator = self._load_indicator_for_user(int(user_id), indicator_id)
+            code = str(indicator.get("runtime_code") or indicator.get("code") or "")
         if not code.strip():
             raise ValueError("Indicator code is empty")
 
