@@ -128,3 +128,18 @@ def test_python_source_is_now_refused():
     verdict = validate_pine_source('my_indicator_name = "Old Python"\noutput = {"plots": []}\n')
     assert verdict["success"] is False
     assert verdict["error_type"] == "PineParseError"
+
+
+def test_a_legacy_study_declaration_names_the_indicator():
+    # `study(` is how a pre-v5 script declares an indicator. Reporting it as
+    # missing a declaration would nag the author about a script that is fine.
+    verdict = validate_pine_source('//@version=4\nstudy("Bands", overlay=true)\nplot(close)')
+    codes = {hint["code"] for hint in verdict["hints"]}
+    assert "MISSING_SCRIPT_DECLARATION" not in codes
+    assert "MISSING_SCRIPT_TITLE" not in codes
+
+
+def test_a_legacy_study_without_a_title_is_told_so():
+    verdict = validate_pine_source('//@version=4\nstudy(overlay=true)\nplot(close)')
+    codes = {hint["code"] for hint in verdict["hints"]}
+    assert "MISSING_SCRIPT_TITLE" in codes

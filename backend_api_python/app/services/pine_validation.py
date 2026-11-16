@@ -45,10 +45,16 @@ MAX_SUPPORTED_VERSION = 6
 #: ``//@version=6`` as Pine requires it: the first line, no leading whitespace.
 _VERSION_RE = re.compile(r"^\s*//\s*@version\s*=\s*(\d+)", re.MULTILINE)
 
-#: ``indicator("Name", ...)`` / ``strategy("Name", ...)``. The declaration is a
-#: statement at column zero, which is what keeps it distinct from a string that
+#: ``indicator(`` / ``strategy(`` / ``study(``: the statement that declares what
+#: the script is. `study` is the pre-v5 spelling of `indicator`. A declaration is
+#: a statement at column zero, which is what keeps it distinct from a string that
 #: merely mentions the word.
-_DECLARATION_RE = re.compile(r"^[ \t]*(indicator|strategy)\s*\(\s*(?:title\s*=\s*)?([\"'])(.*?)\2", re.MULTILINE)
+_DECLARATION_KIND_RE = re.compile(r"^[ \t]*(indicator|strategy|study)\s*\(", re.MULTILINE)
+
+#: The first string literal inside that declaration, which is its title. Kept
+#: apart from the kind so that `study(overlay=true)` still reports as a declared
+#: script that merely has no title.
+_DECLARATION_TITLE_RE = re.compile(r"[\"']([^\"']*)[\"']")
 
 #: A plot call the chart can draw. Used only to warn about a script that declares
 #: itself an indicator and then draws nothing.
@@ -80,17 +86,54 @@ def pine_version(source: str) -> Optional[int]:
         return None
 
 
+def _matching_paren(text: str, open_index: int) -> int:
+    """The index of the ``)`` that closes ``open_index``, or -1.
+
+    Only the declaration is scanned, so a quote-aware walk is enough: the
+    arguments are an expression list, and a ``)`` inside a string belongs to the
+    string rather than the call.
+    """
+    if open_index < 0 or open_index >= len(text) or text[open_index] != "(":
+        return -1
+    depth = 0
+    quote = ""
+    index = open_index
+    while index < len(text):
+        char = text[index]
+        if quote:
+            if char == quote:
+                quote = ""
+        elif char in ("\"", "'"):
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return -1
+
+
 def declaration_of(source: str) -> Dict[str, str]:
     """The script's own ``indicator(...)``/``strategy(...)`` declaration.
 
     Returns ``{"kind", "title"}``; ``kind`` is empty when there is no
     declaration and ``title`` when the declaration carries no title.
     """
-    match = _DECLARATION_RE.search(source or "")
-    if not match:
+    text = source or ""
+    kind_match = _DECLARATION_KIND_RE.search(text)
+    if not kind_match:
         return {"kind": "", "title": ""}
-    title = (match.group(3) or "").strip()
-    return {"kind": match.group(1), "title": title}
+    kind = kind_match.group(1)
+    # Read the title out of this declaration's own parentheses, so a string
+    # elsewhere in the script cannot be mistaken for it.
+    open_paren = text.find("(", kind_match.end() - 1)
+    close_paren = _matching_paren(text, open_paren)
+    args = text[open_paren + 1:close_paren] if close_paren > open_paren else ""
+    title_match = _DECLARATION_TITLE_RE.search(args)
+    title = (title_match.group(1) if title_match else "").strip()
+    return {"kind": kind, "title": title}
 
 
 def extract_indicator_meta(source: str) -> Dict[str, str]:
