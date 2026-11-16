@@ -1,793 +1,571 @@
 # QuantDinger 指标开发指南
 
-> 适用范围：当前 QuantDinger 图表指标契约
-> 面向读者：第一次编写指标的用户、从 Pine/通达信公式迁移的开发者，以及需要审查 AI 生成代码的维护者
+> 适用对象：QuantDinger 的图表指标开发约定，使用 Pine Script v5/v6 编写
+> 读者：初次编写指标的作者、从 Python 指标或 TradingView 脚本迁移过来的开发者，以及审查 AI 生成代码的人
 
-QuantDinger 指标是运行在指标编辑器中的 Python 图表程序。它读取当前图表的 K 线数据，计算序列，并通过 <code>output</code> 返回曲线、标记和稀疏图层。
+QuantDinger 的图表指标是一段 Pine Script study。Indicator IDE 在用户浏览器里通过 PineTS（用 TypeScript 实现的 Pine 运行时）执行源码，源码原样存储在指标记录的 <code>qd_indicator_codes.code</code> 字段。图表上画出来的东西就是浏览器执行出来的东西：图表指标的任何数值都不在服务端计算。
 
-最重要的边界是：**指标只负责看图，不负责交易执行。**
+最重要的边界是：**指标只用于图表分析，不做交易执行。**
 
-指标不能下单、回测、运行实盘、读取账户、管理仓位、设置杠杆或执行止盈止损。需要交易时，应先把指标中的视觉信号转换成 Strategy API V2 策略，再在策略页完成验证、回测和部署。
+指标不能下单、不能回测、不能跑实盘交易、不能读账户、不能管理持仓、不能设置杠杆，也不能执行止损止盈规则。要把一个想法变成交易，需要把它的可视化信号转换成 Strategy API V2 策略，再单独验证、回测和部署那个策略。
 
-与 TradingView/Pine 的兼容目标是：**覆盖常用单标的、单周期指标的计算与视觉语义，而不是兼容 Pine 语法、全部 API 或逐 tick 执行模型。** 从 Pine 迁移时需要把公式改写为 Python/pandas，并按本文的 <code>output</code> 契约返回结果。
+因为源码是 Pine，所以语言语义就是 Pine 的语义：<code>ta.*</code> 计算、<code>[1]</code> 历史引用、<code>var</code> 跨 bar 状态、<code>request.security()</code>、<code>input.*</code> 声明，在浏览器运行时实现的子集内，行为与 TradingView 一致。指标没有的东西是账户、订单和持仓。
+
+支持的版本是 **5 和 6**。版本指令必须是文件的第一行：
+
+~~~pine
+//@version=6
+~~~
+
+低于版本 5 的脚本在到达图表之前就会被拒绝。不能编译的脚本在保存时被拒绝：<code>POST /api/indicator/saveIndicator</code> 和 Agent Gateway 的保存路径会返回 HTTP 400，内容为 <code>Invalid Pine Script: &lt;reason&gt;</code>。保存时的校验由服务端的 Pine 编译器执行（<code>backend_api_python/app/services/pine_validation.py</code>，基于 <code>pynescript</code> 解析器），所以语法错误会在你能修改的地方被指出，而不是等它进入图表之后才暴露。
 
 ---
 
 ## 1. 先完成一个最小指标
 
-把下面代码粘贴到指标编辑器并运行：
+把下面这段贴进 Indicator IDE 并运行：
 
-~~~python
-my_indicator_name = "Close Line"
-my_indicator_description = "Displays the close price as a chart overlay."
+~~~pine
+//@version=6
+indicator("Close Line", overlay=true)
 
-df = df.copy()
-
-close_line = [
-    None if pd.isna(value) else float(value)
-    for value in df["close"]
-]
-
-output = {
-    "name": my_indicator_name,
-    "plots": [
-        {
-            "name": "Close",
-            "data": close_line,
-            "color": "#3B82F6",
-            "type": "line",
-            "overlay": True,
-        }
-    ],
-    "signals": [],
-    "layers": [],
-}
+plot(close, color=#3B82F6)
 ~~~
 
-这个例子展示了完整的最小契约：
+这就是完整的最小约定：
 
-1. 声明名称和描述。
-2. 用 <code>df = df.copy()</code> 创建工作副本。
-3. 计算与 K 线等长的数据。
-4. 设置 <code>output</code> 字典。
+1. 在第一行声明 Pine 版本。
+2. 用 <code>indicator("Close Line", overlay=true)</code> 声明 study。标题会成为保存后的指标名，<code>overlay=true</code> 让它画在价格图上而不是独立副图。
+3. 用 <code>plot()</code> 绘制。没有 output 字典，也没有返回值：绘制调用本身就是输出。
 
-建议新指标按“先画一条线，再加参数，再加事件标记，最后才加复杂图层”的顺序开发。
+新建指标时，先加一条线，再加它的 <code>input.*</code> 设置，然后加事件标记，最后才考虑 label、box 这类绘图对象。
 
 ---
 
 ## 2. 指标、策略和转换流程的边界
 
-| 产物 | 负责内容 | 不负责内容 |
+| 产物 | 负责 | 不负责 |
 | --- | --- | --- |
-| Chart Indicator | 曲线、副图、灯带、视觉标记、区域、标签 | 回测、实盘、订单、仓位、杠杆、交易风控 |
-| Strategy API V2 | 数据订阅、交易信号、订单意图、仓位、回测、实盘、保护规则 | 指标页的 <code>output</code> 图表渲染 |
-| Indicator-to-Strategy | 把视觉信号的真实含义翻译成可执行策略 | 在原指标中混入下单逻辑 |
+| 图表指标（Pine study） | plots、fill、标记、label、box、告警条件 | 回测、实盘交易、订单、持仓、杠杆、执行风险 |
+| Strategy API V2 | 订阅、信号、订单意图、持仓、回测、实盘执行、保护单 | 图表渲染 |
+| 指标转策略 | 把可视化信号的含义翻译成可执行代码 | 把下单行为混进源指标 |
 
-<code>output["signals"]</code> 只是图上的事件标记。例如 <code>sell</code> 类型的 “Death” 标记可以表示多头离场提醒，也可以表示行情转弱；它不会自动开空，更不会自动反手。
+标记只是一次绘制，不是一笔交易。一个标题为“Death”的向下标记，可能表示多头离场警告，也可能只表示条件走弱；它不会开空，也不会反手。
 
-将只做多指标转换成策略时，通常采用：
+对于只做多的转换，通常的对应关系是：
 
 - 明确的看多入场事件 → <code>open_long</code>
 - 明确的看空离场事件 → <code>close_long</code>
-- 只有用户明确要求做空，并提供独立的看空入场规则时，才生成 <code>open_short</code>
+- 只有在用户明确要求做空、并给出独立的看空入场规则时，才生成 <code>open_short</code>
 
-不要在指标里创建 <code>open_long</code>、<code>close_long</code>、<code>open_short</code>、<code>close_short</code>、<code>add_long</code> 或 <code>reduce_long</code> 等执行列，也不要使用旧式 <code># @strategy</code> 注解。
+不要在指标里制造 <code>open_long</code>、<code>close_long</code>、<code>open_short</code>、<code>close_short</code>、<code>add_long</code>、<code>reduce_long</code> 这类执行列：它们属于 Strategy API V2。也没有 <code># @strategy</code> 注解要写——指标根本没有这一层注解。
 
----
-
-## 3. 运行环境与输入数据
-
-运行时预置：
-
-- <code>df</code>：当前图表的 pandas DataFrame，按时间从旧到新排列，每行对应一根 K 线。
-- <code>params</code>：由参数声明和参数面板合并得到的字典。
-- <code>pd</code>：预置的 pandas。
-- <code>np</code>：预置的 numpy。
-- <code>open</code>、<code>high</code>、<code>low</code>、<code>close</code>、<code>volume</code>：部分运行入口还提供同名便捷 Series；为了可读性和可移植性，教程建议优先使用 <code>df["close"]</code>。
-
-标准 OHLCV 字段：
-
-~~~python
-open_price = df["open"]
-high = df["high"]
-low = df["low"]
-close = df["close"]
-volume = df["volume"]
-~~~
-
-注意：
-
-- 不要假设一定存在 <code>time</code> 列，时间也可能已经在 DataFrame 索引中。
-- 不要重命名或删除 OHLCV 列。
-- 可选字段必须先检查，例如 <code>if "turnover" in df.columns:</code>。
-- 修改 DataFrame 前先执行 <code>df = df.copy()</code>。
-- 核心序列计算优先使用 <code>rolling</code>、<code>ewm</code>、<code>shift</code>、<code>where</code> 等向量化操作。
+<code>strategy(...)</code> 声明在 IDE 里是合法的，图表也仍然会画它的 <code>plot()</code> 输出，但浏览器里什么都不执行：策略的入场和出场只在同一份源码被服务端回测时才发生。保存路径会把这种情况报成 <code>SCRIPT_IS_A_STRATEGY</code> 提示，它是说明而不是错误。
 
 ---
 
-## 4. 文件结构与元数据
+## 3. 运行环境：脚本在哪里运行、能读什么
 
-推荐结构：
+IDE 在浏览器里执行脚本。服务端的职责是在保存时编译和校验源码，并单独运行脚本以服务两类无法使用浏览器的调用方。
 
-~~~python
-# @param period int 20 Calculation period
-
-my_indicator_name = "Example Indicator"
-my_indicator_description = "Explains what is drawn and how events are marked."
-
-df = df.copy()
-
-period = int(params.get("period", 20))
-
-# Helper functions
-# Series calculation
-# Marker construction
-
-output = {
-    "name": my_indicator_name,
-    "plots": [],
-    "signals": [],
-    "layers": [],
-}
-~~~
-
-每个指标都应声明：
-
-~~~python
-my_indicator_name = "Dual EMA Viewer"
-my_indicator_description = "Chart-only EMA crossover indicator with visual event markers."
-~~~
-
-名称应简短稳定；描述应说明：
-
-- 计算了什么；
-- 在主图还是副图显示；
-- 标记代表什么事件；
-- 有哪些重要参数。
-
-不要在描述中承诺收益或暗示已通过实盘验证。
-
-根据项目源码规则，代码标识符、元数据、注释、参数描述和默认显示标签使用英文。中文可以用于本教程正文；只有用户明确要求本地化显示标签时，指标中的展示文本才使用指定语言。
-
----
-
-## 5. 参数声明与参数面板
-
-语法：
-
-~~~python
-# @param <name> <int|float|bool|str> <default> <description>
-~~~
-
-示例：
-
-~~~python
-# @param fast_len int 12 Fast EMA period
-# @param slow_len int 26 Slow EMA period
-# @param band_pct float 1.5 Channel width percent
-# @param show_marks bool true Show crossover markers
-# @param source str close Price source
-~~~
-
-声明不会自动创建 Python 变量，必须显式读取：
-
-~~~python
-fast_len = int(params.get("fast_len", 12))
-slow_len = int(params.get("slow_len", 26))
-band_pct = float(params.get("band_pct", 1.5))
-show_marks = bool(params.get("show_marks", True))
-source = str(params.get("source", "close"))
-~~~
-
-硬性规则：
-
-- 每行只声明一个参数。
-- 参数名使用合法 Python 标识符。
-- 类型只使用 <code>int</code>、<code>float</code>、<code>bool</code>、<code>str</code> 或 <code>string</code>。
-- 注释中的默认值必须和 <code>params.get</code> 的回退值一致。
-- 布尔值在声明中写 <code>true</code>/<code>false</code>，Python 中写 <code>True</code>/<code>False</code>。
-- 字符串默认值不能包含空格，因为解析器把默认值读取为一个 token。
-
-参数搜索可在描述末尾声明候选范围：
-
-~~~python
-# @param period int 20 Lookback period range=5:60:5
-# @param multiplier float 2.0 Band multiplier values=1.5,2.0,2.5,3.0
-~~~
-
-<code>range=start:end:step</code> 是包含终点的等差候选序列；<code>values=a,b,c</code> 是显式候选列表。单个参数最多展开 1024 个候选值。描述中的范围标记会从用户可见描述中移除。
-
-指标参数只控制计算和显示。不要声明账户、标的、周期、仓位、杠杆、止损或止盈等执行参数。
-
----
-
-## 6. output 输出契约
-
-指标运行结束时必须设置字典类型的 <code>output</code>：
-
-~~~python
-output = {
-    "name": my_indicator_name,
-    "plots": plots,
-    "signals": signals,
-    "layers": layers,
-}
-~~~
-
-可选字段：
-
-~~~python
-output["calculatedVars"] = {}
-~~~
-
-验证要求：
-
-- <code>output</code> 必须是字典。
-- <code>plots</code> 或 <code>signals</code> 至少有一个键存在。
-- 每个 <code>plot["data"]</code> 的长度必须等于 <code>len(df)</code>。
-- 每个 <code>signal["data"]</code> 的长度必须等于 <code>len(df)</code>。
-- 序列中不要输出 NaN、正无穷或负无穷；缺失点使用 <code>None</code>。
-- <code>layers</code> 不需要逐 bar 数组，但索引、时间和价格必须落在当前数据的有效语义范围内。
-
-推荐总是显式提供空列表，这样结构最清晰：
-
-~~~python
-output = {
-    "name": my_indicator_name,
-    "plots": [],
-    "signals": [],
-    "layers": [],
-}
-~~~
-
----
-
-## 7. plots：主图曲线与副图序列
-
-每个 plot 至少包含：
-
-| 字段 | 类型 | 含义 |
+| 路径 | 运行位置 | 用途 |
 | --- | --- | --- |
-| <code>name</code> | str | 图例和序列名称 |
-| <code>data</code> | list | 与 <code>df</code> 等长的数值/<code>None</code> 列表 |
-| <code>color</code> | str | 推荐使用 <code>#RRGGBB</code> |
-| <code>overlay</code> | bool | <code>True</code> 主图，<code>False</code> 副图 |
-| <code>type</code> | str，可选 | <code>line</code>、<code>bar</code>、<code>circle</code> 或 <code>cloud</code>；别名见下表 |
+| 图表 study | 浏览器，PineTS | 图表上绘制的一切 |
+| 保存/校验 | 服务端，Pine 编译器 | 在源码入库前接受或拒绝 |
+| 告警与 API 调用方 | 服务端，转译成 Python | 为通知和非浏览器调用方评估信号 |
 
-当前公开绘图类型：
+浏览器运行时通过 Pine 的内置序列读取 bar 数据：<code>open</code>、<code>high</code>、<code>low</code>、<code>close</code>、<code>volume</code>、<code>hl2</code>、<code>hlc3</code>、<code>ohlc4</code>、<code>time</code> 和 <code>bar_index</code>。这里没有 <code>df</code>，也没有 <code>params</code> 字典：序列就是以 bar 为索引的值，设置就是 <code>input.*</code> 调用返回的变量。
 
-| 写法 | 规范化结果 | 典型 Pine 对应 |
-| --- | --- | --- |
-| <code>line</code> | 折线 | <code>plot(..., style=plot.style_line)</code> |
-| <code>bar</code>、<code>histogram</code>、<code>column</code> | 从基准值绘制的柱 | histogram/columns |
-| <code>circle</code>、<code>dot</code>、<code>point</code>、<code>scatter</code> | 圆点 | circles/scatter |
-| <code>lamp</code> | 灯带圆点；同一副图有至少 3 个灯带序列时自动按行排列 | 状态面板的近似表达 |
-| <code>cloud</code>、<code>band</code>、<code>fill_between</code>、<code>fill-between</code> | 填充上下两条序列之间的区域 | <code>fill(plot1, plot2)</code> |
+可用命名空间：<code>ta</code>、<code>math</code>、<code>str</code>、<code>color</code>、<code>array</code>、<code>matrix</code>、<code>map</code>、<code>request</code>、<code>input</code>、<code>strategy</code>、<code>syminfo</code>、<code>timeframe</code> 和 <code>chart</code>。随运行时提供的库只有一个：<code>TradingView/ta</code>（任意版本），其中的 <code>requestVolumeDelta</code> 把一根 K 线拆成买入与卖出成交量。不要 import 未随运行时一并提供的库：解析不到的 import 会让整段脚本失败。
 
-样式字段按图形类型生效：
+同一份源码会被两套执行环境读取，由此得到两条规则：
 
-- 通用：<code>color</code>、<code>opacity</code>。
-- 折线：<code>lineWidth</code>，以及 <code>lineStyle</code>/<code>style</code>（例如 <code>solid</code>、<code>dashed</code>）。
-- 柱和圆点：<code>size</code>/<code>radius</code>、<code>borderColor</code>、<code>borderSize</code>；柱还可设置 <code>baseValue</code>。
-- 云带：每个点使用 <code>upper</code> 和 <code>lower</code>，可逐点设置 <code>color</code>；<code>opacity</code> 的有效范围为 <code>0.02</code> 至 <code>0.30</code>。设置 <code>title=False</code> 可隐藏云带图例。
-- 同一指标内所有 <code>overlay=False</code> 的序列共享一个副图，不会像多个独立 Pine 脚本那样自动创建多个副图。
+- 图表是在浏览器里对图表已有的 bar 做的重放。没有订单、账户或组合状态可读。
+- 告警使用的服务端路径会先把 Pine 源码转译成 Python 再求值。这解释了为什么告警评估的条件与图表画出来的一致。两条路径并不完全相同：服务端重放会折叠 bar 状态，因此依赖实时 bar 的条件必须用 <code>barstate.isconfirmed</code> 加闸，告警才会与图表一致。
 
-需要 Pine 的 series color/动态点大小时，<code>data</code> 的单点可以从数值扩展为对象：
-
-~~~python
-dynamic_points = [
-    None,
-    {"value": 102.5, "color": "#22C55E", "size": 4},
-    {"value": 101.8, "color": "#EF4444", "size": 6},
-]
-~~~
-
-对象中的数值键可使用 <code>value</code>、<code>y</code> 或 <code>data</code>；颜色键可使用 <code>color</code>、<code>fillColor</code> 或 <code>backgroundColor</code>；大小键可使用 <code>size</code>、<code>radius</code> 或 <code>r</code>。推荐在新代码中只使用第一组规范字段 <code>value/color/size</code>。
-
-### 填充云带
-
-云带的每个点是包含 <code>upper</code> 和 <code>lower</code> 的对象，列表长度仍须等于 <code>len(df)</code>。需要中断云带的预热区或震荡区应输出 <code>None</code>，避免跨越空白区错误连线。渲染器会自动排序上下值，因此两条线交叉时云带仍能正确显示。
-
-~~~python
-# @param cloud_opacity float 0.10 Cloud opacity range=0.03:0.24:0.01
-
-cloud_opacity = min(0.24, max(0.03, float(params.get("cloud_opacity", 0.10))))
-trend_cloud = []
-
-for index in range(len(df)):
-    fast_value = ema_fast.iloc[index]
-    slow_value = ema_slow.iloc[index]
-
-    if pd.isna(fast_value) or pd.isna(slow_value) or not bool(trending.iloc[index]):
-        trend_cloud.append(None)
-        continue
-
-    trend_cloud.append(
-        {
-            "upper": float(max(fast_value, slow_value)),
-            "lower": float(min(fast_value, slow_value)),
-            "color": "#22C55E" if fast_value >= slow_value else "#F43F5E",
-        }
-    )
-
-plots = [
-    {
-        "name": "趋势云",
-        "title": False,
-        "data": trend_cloud,
-        "color": "#22C55E",
-        "type": "cloud",
-        "overlay": True,
-        "opacity": cloud_opacity,
-    },
-]
-~~~
-
-规范字段为 <code>upper/lower/color</code>。上沿兼容 <code>top</code>、<code>high</code>、<code>value</code>、<code>y</code>、<code>data</code>，下沿兼容 <code>bottom</code>、<code>low</code>。新指标应优先使用规范字段。
-
-示例：
-
-~~~python
-plots = [
-    {
-        "name": "EMA Fast",
-        "data": fast_values,
-        "color": "#22C55E",
-        "type": "line",
-        "overlay": True,
-    },
-    {
-        "name": "RSI",
-        "data": rsi_values,
-        "color": "#8B5CF6",
-        "type": "line",
-        "overlay": False,
-    },
-]
-~~~
-
-价格均线、布林带和通道通常使用主图；RSI、MACD 和状态灯带通常使用副图。
-
-统一处理空值：
-
-~~~python
-def to_plot_list(series):
-    return [
-        None if pd.isna(value) else float(value)
-        for value in series
-    ]
-~~~
-
-不要把价格叠加线的预热空值填成 0，否则图上会出现从零点拉到真实价格的误导性线段。
+历史引用、<code>var</code> 和 <code>na</code> 遵循 Pine 语义。来自未来的序列不存在；<code>close[1]</code> 是上一根 bar，读到第一根可用 bar 之前会得到 <code>na</code>。
 
 ---
 
-## 8. signals：稀疏视觉事件
+## 4. 脚本结构与元数据
 
-signal 示例：
+完整的 study 只有一种结构：
 
-~~~python
-signals = [
-    {
-        "type": "buy",
-        "text": "Long Entry",
-        "color": "#22C55E",
-        "data": entry_marks,
-    },
-    {
-        "type": "sell",
-        "text": "Long Exit",
-        "color": "#EF4444",
-        "data": exit_marks,
-    },
-]
+~~~pine
+//@version=6
+// Dual EMA Viewer — chart-only study, no order logic.
+
+indicator("Dual EMA Viewer", overlay=true)
+
+// 1. Settings
+// 2. Calculation
+// 3. Drawing
+// 4. Alerts
 ~~~
+
+编译器与保存路径会强制以下规则：
+
+- 第一行是 <code>//@version=6</code>。
+- 只有一处 <code>indicator(...)</code> 或 <code>strategy(...)</code> 声明，写在一行内，位于文件靠前处的行首。
+- 声明的第一个字符串参数是 study 标题。该标题就是指标库列表里显示的名字，没有单独的名字块。
+- 用户可能调整的每个参数都用 <code>input.*</code> 声明，不要留成散落在代码里的字面量。
+
+没有单独的元数据块。已退役的 Python 约定用一句裸赋值（<code>my_indicator_name = "..."</code>）来做同一件事；迁移后的脚本用声明标题替代它，保存路径也优先读取标题。
+
+项目源码规则要求标识符、注释、input 标题和默认显示标签使用英文。只有在用户明确要求目标语言时才本地化显示文本。
+
+---
+
+## 5. 参数声明：编写 input.* 字段
+
+IDE 通过扫描脚本里的 <code>input.*</code> 声明来生成参数面板。没有需要另外声明的东西，也没有需要注册的东西：源码里存在的 input 就会成为表单字段，它的标题、分组、提示和范围都来自你写的参数。
+
+~~~pine
+//@version=6
+indicator("EMA Channel", overlay=true)
+
+fastLen = input.int(12, "Fast EMA length", minval=1, maxval=200, step=1, group="Parameters", tooltip="Bars used by the fast EMA. Lower values react sooner and whipsaw more.")
+slowLen = input.int(26, "Slow EMA length", minval=2, maxval=400, step=2, group="Parameters", tooltip="Bars used by the slow EMA. Must stay above the fast length.")
+bandPct = input.float(1.5, "Channel width (%)", minval=0.1, maxval=10.0, step=0.1, group="Parameters", tooltip="Distance of the channel from the fast EMA, in percent.")
+showMarks = input.bool(true, "Show crossover markers", group="Visuals")
+lineColor = input.color(#3B82F6, "Line color", group="Visuals")
+src = input.source(close, "Price source", group="Visuals")
+htf = input.timeframe("1D", "Higher timeframe", group="Visuals")
+~~~
+
+每个参数在面板里的效果：
+
+| 参数 | 面板效果 |
+| --- | --- |
+| 第二个参数 <code>title</code> | 字段标签，同时也是保存参数值所用的键 |
+| <code>group</code> | 字段被放入的分区 |
+| <code>tooltip</code> | 字段旁边显示的帮助文本 |
+| <code>minval</code> / <code>maxval</code> | 数值字段允许的最小值和最大值 |
+| <code>options=[...]</code> | 用下拉框代替自由输入 |
+| 第一个参数 <code>defval</code> | 面板初始值 |
+
+会变成表单字段的 input 构造器：<code>input.int</code>、<code>input.float</code>、<code>input.bool</code>、<code>input.string</code>、<code>input.color</code>、<code>input.source</code>、<code>input.timeframe</code>、<code>input.symbol</code>、<code>input.session</code>、<code>input.price</code>、<code>input.time</code>、<code>input.text_area</code> 和 <code>input.enum</code>。
 
 规则：
 
-- <code>type</code> 通常为 <code>buy</code> 或 <code>sell</code>，只控制标记方向，不是信号名称。
-- <code>text</code> 是稳定的信号名；可选 <code>textData</code> 可为每根 bar 提供不同标签。
-- 最稳定、最便于通知系统识别的写法，是用 <code>data[i]</code> 中的有限非零价格激活第 i 根 bar 的信号。
-- <code>text</code> 或 <code>textData</code> 本身不会激活信号。
-- 无信号位置必须使用真实的 <code>None</code>。
-- 默认标记一次性事件，不要在条件持续为真时每根 bar 都重复标记。
+- 用 input 声明的标题作为标签。没有标题的字段不会显示。
+- 默认值必须是字面量，或是被赋了字面量的常量。面板在脚本运行之前就从源码里读出它，因此计算得出的默认值（<code>input.int(timeframe.period)</code>）没有可显示的值，字段会报无默认值。
+- 不要在代码里为同一个设置再起一个名字。声明赋值给的变量就是脚本使用的值：上面的 <code>fastLen</code> 就是长度本身，不是查表用的键。
+- 长度或索引参数必须是 <code>int</code>：<code>ta.ema(close, 12)</code> 可以，<code>ta.ema(close, 12.5)</code> 会被编译器拒绝。
+- 参数只控制计算和显示。不要在指标里声明账户、持仓、杠杆、止损或止盈参数，它们属于策略。
 
-兼容格式也允许 <code>True</code>，或 <code>{"active": True, "price": ..., "text": ..., "color": ...}</code>。布尔值没有价格时，渲染器会按当前 K 线高低点定位。为了让图表预览、保存后的信号监控和未来客户端保持一致，新指标优先使用“价格或 <code>None</code>”格式；只有确实需要逐点文本/颜色时才使用对象。
+下拉与受限取值示例：
 
-<code>renderMode</code> 控制持续条件如何变成标记：
+~~~pine
+mode = input.string("Trend", "Mode", options=["Trend", "Range", "Off"], group="Parameters", tooltip="Which branch of the study to draw.")
+~~~
 
-| 值 | 行为 |
+---
+
+## 6. 曲线、蜡烛、填充与颜色
+
+<code>plot()</code> 在图表上绘制一条序列。它的参数是值和可选的图例标题与样式：
+
+~~~pine
+//@version=6
+indicator("EMA Overlay", overlay=true)
+
+emaFast = ta.ema(close, 12)
+emaSlow = ta.ema(close, 26)
+
+plot(emaFast, "EMA Fast", color=#22C55E, linewidth=2)
+plot(emaSlow, "EMA Slow", color=#3B82F6, linewidth=2)
+~~~
+
+- <code>title</code> 是图例显示的名字。读者需要识别的线都要给标题；辅助序列不加标题，或用 <code>display=display.none</code> 隐藏。
+- <code>style</code> 选择绘制形式：<code>plot.style_line</code>、<code>plot.style_linebr</code>（值为 <code>na</code> 处断开）、<code>plot.style_stepline</code>、<code>plot.style_columns</code>、<code>plot.style_histogram</code>、<code>plot.style_circles</code>、<code>plot.style_cross</code>、<code>plot.style_area</code>、<code>plot.style_areabr</code>。
+- <code>color</code> 接受十六进制字面量或 <code>color.*</code>。逐 bar 变色是序列表达式：<code>color = close >= open ? #22C55E : #EF4444</code>。
+- 断点是 <code>na</code>。写 <code>plot(condition ? value : na)</code>；绝不要用一个哨兵值（例如 <code>0</code>）代表缺失点，否则线会穿过零值，歪曲价格。
+- <code>offset</code> 按整根 bar 平移绘制。绘图确实需要位移时才用它，不要把位移塞进数值里。
+
+蜡烛和条形有专门的调用：
+
+~~~pine
+plotcandle(open, high, low, close, "Custom candles", color=close >= open ? #22C55E : #EF4444, wickcolor=#9CA3AF, bordercolor=#374151)
+~~~
+
+<code>plotbar()</code> 用同样的四个值画 OHLC 条形。
+
+水平线与填充区域：
+
+~~~pine
+hline(70, "Overbought", color=color.new(#EF4444, 60))
+hline(30, "Oversold", color=color.new(#22C55E, 60))
+
+upper = plot(emaFast * 1.005, "Channel upper", color=#22C55E, display=display.none)
+lower = plot(emaFast * 0.995, "Channel lower", color=#22C55E, display=display.none)
+fill(upper, lower, color=color.new(#22C55E, 85), title="Channel")
+~~~
+
+- <code>hline()</code> 接受常量价格。它是一条水平位，不是序列。
+- <code>fill()</code> 接受需要填充的两个 <code>plot()</code> 句柄。该传句柄的地方绝不硬编码数值。
+- <code>color.new(color, transparency)</code> 构造半透明颜色；0 是不透明，100 是完全透明。价格后方的云带建议透明度高于 60。
+- <code>bgcolor()</code> 和 <code>barcolor()</code> 给整个背景或蜡烛着色，每根 bar 一个颜色。用 <code>na</code> 让某根 bar 保持原样。
+
+~~~pine
+bgcolor(emaFast > emaSlow ? color.new(#22C55E, 92) : color.new(#EF4444, 92), title="Regime")
+barcolor(close >= open ? #22C55E : #EF4444, title="Candle direction")
+~~~
+
+### 填充云带
+
+云带是两条 <code>plot()</code> 句柄加一次 <code>fill()</code>。上下边界在绘制时才排序，因此两条线交叉时云带依然正确：
+
+~~~pine
+//@version=6
+indicator("Trend envelope", overlay=true)
+
+fastLen = input.int(12, "Fast EMA length", minval=1, maxval=200, group="Parameters")
+slowLen = input.int(26, "Slow EMA length", minval=2, maxval=400, group="Parameters")
+cloudOpacity = input.int(85, "Cloud transparency", minval=60, maxval=98, group="Visuals")
+
+emaFast = ta.ema(close, fastLen)
+emaSlow = ta.ema(close, slowLen)
+
+upper = plot(math.max(emaFast, emaSlow), "Upper edge", color=#22C55E)
+lower = plot(math.min(emaFast, emaSlow), "Lower edge", color=#F43F5E)
+fill(upper, lower, color=emaFast >= emaSlow ? color.new(#22C55E, cloudOpacity) : color.new(#F43F5E, cloudOpacity), title="Trend cloud")
+~~~
+
+均线、布林带和价格通道通常叠加在价格图上（<code>overlay=true</code>）。RSI、MACD 等振荡指标通常使用独立副图（<code>overlay=false</code>）；同一个 study 的所有 plot 共享那个副图，因此不会像多个独立 TradingView 脚本那样分成多个副图。
+
+---
+
+## 7. 标记：单根 bar 的事件
+
+标记应该画在“发生了变化”的那根 bar 上，而不是“条件恰好成立”的每一根 bar 上。Pine 直接提供变化事件：
+
+~~~pine
+//@version=6
+indicator("EMA Cross Markers", overlay=true)
+
+fastLen = input.int(12, "Fast EMA length", minval=1, maxval=200, group="Parameters")
+slowLen = input.int(26, "Slow EMA length", minval=2, maxval=400, group="Parameters")
+showMarks = input.bool(true, "Show crossover markers", group="Visuals")
+
+emaFast = ta.ema(close, fastLen)
+emaSlow = ta.ema(close, slowLen)
+
+crossUp = ta.crossover(emaFast, emaSlow)
+crossDown = ta.crossunder(emaFast, emaSlow)
+
+plotshape(showMarks and crossUp, "Golden cross", shape.triangleup, location.belowbar, #22C55E, size=size.small)
+plotshape(showMarks and crossDown, "Death cross", shape.triangledown, location.abovebar, #EF4444, size=size.small)
+~~~
+
+为什么这个区分重要：
+
+- <code>ta.crossover(a, b)</code> 只在 <code>a</code> 上穿 <code>b</code> 的那一根 bar 上为真；<code>ta.crossunder</code> 是它的镜像。这才是作者所说的“交叉”事件。
+- <code>emaFast &gt; emaSlow</code> 这样的连续布尔条件在整个趋势期间的每根 bar 上都为真。把它当作标记条件，会在所有这些 bar 上都画一个形状；用它构造 <code>alertcondition</code>，会在趋势持续的每根 bar 上触发。这是已发布指标里最常见的编写错误。
+- 不带条件的布尔值，例如 <code>plotshape(true, ...)</code>，会标记每一根 bar，几乎从来不是想要的。
+
+标记调用：
+
+| 调用 | 用途 |
 | --- | --- |
-| <code>events</code>（显式事件模式） | 每个非空事件点都显示并可触发通知 |
-| <code>points</code> / <code>markers</code> / <code>raw</code> | 明确保留每个激活点 |
-| <code>state</code> / <code>continuous</code> / <code>condition</code> | 只在 False → True 的边沿显示并通知 |
+| <code>plotshape(cond, title, shape.triangleup, location.belowbar, color)</code> | 在 bar 固定一侧画内置形状 |
+| <code>plotchar(cond, title, "▲", location.belowbar, color)</code> | 用单个字符代替形状 |
+| <code>plotarrow(up, "Delta")</code> | 按幅度大小的上下箭头 |
 
-如果不指定模式，运行时会把高密度激活序列识别为持续状态并自动做边沿化。公共指标不要依赖这个启发式规则；应直接生成稀疏事件，或显式设置 <code>renderMode</code>。
+值得设置的标记参数：<code>title</code>（标记与其告警在列表里显示的名字）、<code>location.belowbar</code> / <code>location.abovebar</code>、<code>size</code>、形状上的短标签 <code>text</code>，以及逐 bar 的 <code>color</code>。
 
-把状态转换成边沿事件：
-
-~~~python
-def edge(condition):
-    current = condition.fillna(False).astype(bool)
-    previous = current.shift(1, fill_value=False).astype(bool)
-    return current & ~previous
-~~~
-
-生成价格标记：
-
-~~~python
-entry_event = edge(ema_fast > ema_slow)
-exit_event = edge(ema_fast < ema_slow)
-
-entry_marks = [
-    float(df["low"].iloc[i] * 0.995)
-    if bool(entry_event.iloc[i])
-    else None
-    for i in range(len(df))
-]
-
-exit_marks = [
-    float(df["high"].iloc[i] * 1.005)
-    if bool(exit_event.iloc[i])
-    else None
-    for i in range(len(df))
-]
-~~~
-
-如果要求“确认后下一根显示”：
-
-~~~python
-confirmed_entry = edge(raw_entry).shift(
-    1,
-    fill_value=False,
-).astype(bool)
-~~~
-
-这只是把已确认事件向后移动一根，并没有读取未来数据。
+标记仍然只是绘制。绿色三角不是多头持仓，它只是“多头入场条件在这根 bar 上成立”。
 
 ---
 
-## 9. layers：区域、线段和标签
+## 8. 告警与其他周期
 
-普通指标优先使用 plots 和 signals。只有在供需区、支撑阻力、通道、失效位或结构标签确实能提高可读性时才使用 layers。
+<code>alertcondition()</code> 声明一个用户可以挂告警的条件。它不下单，自己也不发送任何东西：
 
-区域：
-
-~~~python
-{
-    "type": "zone",
-    "startIndex": 120,
-    "endIndex": 180,
-    "top": 105.2,
-    "bottom": 101.8,
-    "text": "Demand",
-    "fillColor": "#22C55E",
-    "borderColor": "#22C55E",
-    "opacity": 0.12,
-}
+~~~pine
+alertcondition(ta.crossover(emaFast, emaSlow), "Golden cross", "EMA fast crossed above slow")
+alertcondition(ta.crossunder(emaFast, emaSlow), "Death cross", "EMA fast crossed below slow")
 ~~~
 
-水平线：
+- 第一个参数是条件，第二个是告警在界面里的标题，第三个是消息文本。
+- 在事件条件上声明告警。状态条件会在该状态的每一根 bar 上都通知。
+- 图表画标记，告警面板列出条件。通道、投递方式等配置由用户在保存后选择；脚本自己发不出通知。
+- 信号告警在服务端评估：存储的 Pine 源码被转译成 Python，并在告警所用标的和周期的 bar 上重放。最后一根已完成 bar 上的标记会在下一根 bar 投递，因此告警不会漂到仍在形成的蜡烛上。
 
-~~~python
-{
-    "type": "line",
-    "startIndex": 100,
-    "endIndex": len(df) - 1,
-    "price": 98.5,
-    "text": "Support",
-    "color": "#F59E0B",
-    "dashed": True,
-}
+其他标的和周期来自 <code>request.security()</code>。这是读取图表当前未显示的数据的唯一方式：
+
+~~~pine
+htfClose = request.security(syminfo.tickerid, "1D", close[1], lookahead=barmerge.lookahead_off)
 ~~~
 
-斜线把 <code>price</code> 换成 <code>startPrice</code> 和 <code>endPrice</code>。标签：
+- 第二个参数是周期，第三个是在该周期上求值的表达式。
+- 在高周期上读 <code>close[1]</code> 读的是已经收线的那根值。在那里读 <code>close</code> 读的是仍在变化的那根 bar，它的值会一直变到该高周期 bar 收线。
+- <code>lookahead=barmerge.lookahead_off</code> 是诚实的默认值；<code>lookahead_on</code> 会在值还不存在时就显示它，这是回测无法在实盘中复现的常见原因。
+- 高周期读取不会切换图表周期。study 仍然运行在图表的 bar 上。
 
-~~~python
-{
-    "type": "label",
-    "index": len(df) - 1,
-    "price": float(df["close"].iloc[-1]),
-    "text": "Trend Weakens",
-    "color": "#EF4444",
-    "textColor": "#FFFFFF",
-}
+### 等待收盘的 bar
+
+重绘是作者的责任，对应的工具是 <code>barstate.isconfirmed</code>：
+
+~~~pine
+confirmedUp = ta.crossover(emaFast, emaSlow) and barstate.isconfirmed
+
+plotshape(confirmedUp, "Confirmed cross", shape.triangleup, location.belowbar, #22C55E)
+alertcondition(confirmedUp, "Confirmed cross", "EMA fast crossed above slow on a closed bar")
 ~~~
 
-索引写法对当前 <code>df</code> 最稳定。也支持与 K 线时间戳匹配的 <code>startTime</code>、<code>endTime</code> 和 <code>time</code>。
-
-图层仍然只是视觉对象，不能表示真实订单、仓位或已托管止损。
+当最右侧的 bar 仍在形成时，<code>barstate.isconfirmed</code> 为假，因此标记和告警条件都会等到该 bar 收线。任何读取实时值的条件——当前 close、高周期读取、成交量数值——如果要驱动告警或对历史作断言，都必须这样加闸。
 
 ---
 
-## 10. 与 TradingView/Pine 的能力对应
+## 9. 线段、标签和方框
 
-QuantDinger 不执行 Pine 源码。迁移目标是保持指标含义、数值时序和视觉表达一致，再用 Python/pandas 实现。以下是当前契约的真实边界：
+大多数 study 只需要 plots 和 markers。当标注是一个对象而不是逐 bar 序列时，才使用 Pine 的绘图对象：支撑线、需求区、某个结构事件上的一次性标签。
 
-| TradingView/Pine 能力域 | 当前状态 | QuantDinger 写法或限制 |
-| --- | --- | --- |
-| OHLCV、历史引用、滚动窗口 | 支持 | <code>df</code>、<code>shift</code>、<code>rolling</code>、<code>ewm</code> |
-| <code>input.int/float/bool/string</code> | 支持主要语义 | <code># @param</code>；暂不支持 Pine 的 group、inline、confirm 和专用 color/source/timeframe/symbol 输入控件 |
-| <code>ta.*</code> 常用技术指标 | 计算语义可实现 | 使用 pandas/numpy；指标运行时暂不提供与 Pine 同名的 <code>ta</code> 命名空间，迁移时必须核对平滑算法、预热值和 NaN 规则 |
-| <code>plot()</code>、histogram、circles | 支持常用子集 | <code>plots</code> 的 line/bar/circle，支持主图/副图和逐点颜色/大小 |
-| 两条 plot 之间的 <code>fill()</code> | 支持 | 使用 <code>cloud</code> plot，逐点提供 <code>upper</code>/<code>lower</code>，并可设置逐点颜色 |
-| <code>plotshape()</code>、<code>plotchar()</code> | 支持主要事件语义 | 使用 <code>signals</code>；动态文字用 <code>textData</code> 或点对象 |
-| <code>hline()</code>、line、box、label | 支持常用静态结果 | 使用 line/zone/label layers；每次运行返回最终对象列表，没有 Pine 对象 ID、修改方法或垃圾回收语义 |
-| <code>alert()</code>、<code>alertcondition()</code> | 部分支持 | 指标输出 <code>signals</code>，保存后由用户配置监控通知；指标代码本身不直接发送通知或下单 |
-| arrays、maps、用户函数与状态计算 | Python 等价能力 | 使用 list/dict、函数、pandas Series；这是整段 DataFrame 批量计算，不是 Pine 的逐 bar <code>var</code>/<code>varip</code> 执行模型 |
-| linefill、<code>bgcolor()</code>、<code>barcolor()</code> | 尚无一等契约 | 固定区间可用 zone 近似；不能宣称为完整背景或 K 线着色兼容 |
-| area/step/cross/arrow、<code>plotcandle()</code>/<code>plotbar()</code> | 尚未支持 | 当前未知 <code>type</code> 会退化为 line，不应依赖退化行为 |
-| table、polyline、动态 drawing 对象生命周期 | 尚未支持 | 不要输出未定义对象 |
-| <code>request.security()</code>、<code>request.*()</code>、跨标的/多周期 | 尚未支持 | 指标只接收当前图表 DataFrame；不能在代码中自行请求网络或交易所数据 |
-| <code>barstate.*</code>、逐 tick 更新和 rollback | 不同执行模型 | 当前按收到的完整 DataFrame 批量重算；应以已完成 K 线事件作为可复现基准 |
-| strategy.*、订单、仓位和回测 | 不属于指标 | 转换到 Strategy API V2 |
+~~~pine
+// A label on each confirmed crossover, deleted when the next one appears.
+var label lastMark = na
 
-因此，“大部分功能一致”的推荐验收口径是：常见单标的、单周期指标在相同 OHLCV、参数、已完成 K 线上得到等价数值和事件；不要求 Pine 源码直接运行，也不把多周期请求、逐 tick 状态或高级绘图对象算作当前已兼容功能。
+if confirmedUp
+    if not na(lastMark)
+        label.delete(lastMark)
+    lastMark := label.new(bar_index, low, "Long", style=label.style_label_up, color=#22C55E, textcolor=#FFFFFF)
+~~~
 
-迁移 Pine 指标时逐项核对：
+~~~pine
+// A horizontal level held for the last 100 bars.
+var line support = na
 
-1. 明确 Pine 版本、输入参数、源序列和指标所在周期。
-2. 对齐 SMA/EMA/RMA/WMA、标准差、ATR 和交叉等函数的精确定义；不要只比较函数名称。
-3. 对齐预热期、<code>na</code> 传播、除零处理和首次有效 bar。
-4. 把持续条件与一次性事件分开；Pine 的条件序列不能直接当成每根 bar 的重复通知。
-5. 用固定 OHLCV 样本比较序列容差、事件 bar 索引和图层锚点。
-6. Pine 脚本包含表中“尚未支持”的能力时，必须删减、近似表达，或先扩展平台契约，不能在指南或代码注释中声称完全一致。
+if bar_index == last_bar_index - 100
+    support := line.new(bar_index, low, last_bar_index, low, color=#F59E0B, width=1, style=line.style_dashed)
+~~~
 
-Pine 能力分类可参考 TradingView 官方文档：[Visuals overview](https://www.tradingview.com/pine-script-docs/visuals/overview/)、[Inputs](https://www.tradingview.com/pine-script-docs/concepts/inputs/)、[Other timeframes and data](https://www.tradingview.com/pine-script-docs/concepts/other-timeframes-and-data/)、[Bar states](https://www.tradingview.com/pine-script-docs/concepts/bar-states/)。
+- <code>var</code> 让一个句柄跨 bar 保持，而不是每根 bar 新建一个对象。没有它，study 会每根 bar 造一个新绘制，直到达到对象上限并把最旧的丢掉。
+- 删除被取代的对象：<code>label.delete()</code>、<code>line.delete()</code>、<code>box.delete()</code>。留在图上的过期标记会被读成仍然有效的水平位。
+- 脚本可保留的对象数量受声明上限控制：<code>indicator(..., max_labels_count=500, max_lines_count=500, max_boxes_count=500)</code>。
+- <code>box.new()</code> 画一个区域：上边、下边、左边界、右边界。<code>bgcolor()</code> 不能替代一个起止于特定 bar 的区域。
+- 句柄数组是管理集合的方式：<code>array.new_line()</code> 配合 <code>array.push()</code>，需要裁剪时用 <code>line.delete()</code>。
+
+绘图对象依然只是绘制。标着“Support”的方框不是订单、不是止损、不是持仓。
 
 ---
 
-## 11. pandas 与 numpy 类型陷阱
+## 10. 从 Python 指标迁移到 Pine
 
-最常见的错误是把 numpy ndarray 当成 pandas Series。
+Python 指标约定已退役。存储的指标是 Pine 源码；仍保存 Python 的记录在保存时会被拒绝，因为源码不再能编译。重写是机械性的，下表就是全部内容：
 
-错误：
-
-~~~python
-values = np.where(close > close.shift(1), close, 0)
-average = values.rolling(10).mean()
-~~~
-
-<code>np.where</code> 可能返回 ndarray，而 ndarray 没有 <code>rolling</code>、<code>shift</code>、<code>ewm</code>、<code>fillna</code> 或 <code>iloc</code>。
-
-优先使用 pandas 原生写法：
-
-~~~python
-values = close.where(close > close.shift(1), 0)
-average = values.rolling(10).mean()
-~~~
-
-必须包装 ndarray 时：
-
-~~~python
-array = np.where(close > close.shift(1), close, 0)
-values = pd.Series(array, index=df.index)
-~~~
-
-一定传入 <code>index=df.index</code>。否则新 Series 使用 RangeIndex，与 DatetimeIndex 数据做运算时会静默错位。
-
-常用替换：
-
-| numpy 写法 | pandas 优先写法 |
+| Python 指标（已退役） | Pine study（当前） |
 | --- | --- |
-| <code>np.where(cond, a, b)</code> | <code>a.where(cond, b)</code> |
-| <code>np.maximum(s, 0)</code> | <code>s.clip(lower=0)</code> |
-| <code>np.minimum(s, k)</code> | <code>s.clip(upper=k)</code> |
-| <code>np.abs(s)</code> | <code>s.abs()</code> |
+| <code>my_indicator_name = "..."</code> | <code>indicator("...")</code> 里的标题 |
+| <code>my_indicator_description = "..."</code> | 存在时仍会作为该记录行的描述被读取；Pine 没有描述语法，否则它来自保存请求 |
+| <code># @param fast_len int 12 Fast EMA period</code> | <code>fastLen = input.int(12, "Fast EMA period", minval=1)</code> |
+| <code>params.get("fast_len", 12)</code> | 声明产生的变量 <code>fastLen</code> |
+| <code>df</code> 工作副本 | 内置序列 <code>open/high/low/close/volume</code> |
+| pandas 或 numpy 运算 | <code>ta.*</code>、<code>math.*</code> 和普通序列运算 |
+| <code>output</code> 字典 | <code>plot()</code>、<code>plotshape()</code> 以及各类绘图调用 |
+| 带 <code>upper</code>/<code>lower</code> 的云带条目 | 两条 <code>plot()</code> 句柄加一次 <code>fill()</code> |
+| 带 <code>None</code> 空洞的标记列表 | 单根 bar 事件上的 <code>plotshape(condition, ...)</code> |
+| 区域、线段或标签图层对象 | <code>box.new()</code>、<code>line.new()</code>、<code>label.new()</code> |
+| 用 <code>None</code> 表示缺失值 | <code>na</code> |
+
+步骤：
+
+1. 把逻辑重写成 Pine。没有 DataFrame 可切，也没有向量化的等价写法：<code>ta.ema(close, len)</code> 替代手写的 <code>ewm</code> 链，<code>close[1]</code> 替代 <code>shift</code>。
+2. 删掉 <code># @param</code> 块，改用 <code>input.*</code> 声明，保留同样的默认值，并补上旧代码隐含的范围（<code>minval</code>、<code>maxval</code>、<code>step</code>）。
+3. 删掉 <code>output</code> 字典，为每个条目调用对应的绘图函数：plot 条目改为 <code>plot()</code>，marker 条目改为 <code>plotshape()</code>，云带条目改为两条 plot 加一次 <code>fill()</code>。
+4. 保留计算，丢掉管道。哨兵值、索引技巧和 <code>df</code> 复制那一步都会消失。
+5. 保存。参数面板由代码推导而来，之后没有需要同步的东西：修改一行 <code>input.*</code> 就是在修改表单。
+
+参数面板自我推导，这也意味着用户应该能改的值不能是埋在函数体里的字面量——迁移时就把它提升为 input，否则以后无法调整。
+
+---
+
+## 11. Pine 类型与序列陷阱
+
+若干 Python 习惯翻译过来会出问题。以下这些会让图表看起来合理但实际是错的：
+
+- <code>na</code> 是 Pine 的缺失值，并且会传播。与 <code>na</code> 运算得到 <code>na</code>，与 <code>na</code> 比较既不真也不假，绘制 <code>na</code> 就是断点。除非 study 确实想表达零，否则不要用 <code>nz()</code> 掩盖它：<code>nz(rsi)</code> 会把预热期的空缺变成 0，而 0 是一个真实的 RSI 读数。
+- 整数除法会截断。<code>1/2</code> 是 <code>0</code>，不是 <code>0.5</code>；需要比率时写 <code>1.0/2</code>，或使用浮点 input。
+- 长度和索引必须是整数。<code>ta.ema(close, len)</code> 要求 <code>int</code>；浮点长度是编译错误，不是四舍五入。
+- 历史偏移只能读过去。<code>close[1]</code> 是上一根 bar，读到图表数据的第一根之前是 <code>na</code>。长回看要用 <code>bar_index &gt; n</code> 保护。
+- <code>var</code> 和 <code>varip</code> 跨 bar 保持状态。正是它让计数器和绘制句柄能工作，也正是它让脚本的行为不同于每次全新求值：用 <code>na</code> 或字面量初始化，并在该赋值的那根 bar 上赋值。
+- 序列不能用在需要简单值的地方，例如 input 默认值或周期字符串。<code>timeframe.period</code> 只读一次，是简单值；<code>str.tostring(close)</code> 是序列。
+- 标题或消息里的字符串是字面量。<code>alertcondition()</code> 里的告警消息无法用序列拼接；消息是固定文本。
+- 除以零会得到 <code>na</code> 或无穷大。要保护分母（<code>den == 0 ? na : num/den</code>），不要让尖峰画进图里。
 
 ---
 
 ## 12. 避免未来数据和重绘
 
-指标只能使用当前及历史 bar。禁止：
+study 只能使用当前和更早的 bar。在 Pine 里破坏这一点的常见方式：
 
-- <code>shift(-1)</code>、<code>shift(-N)</code>；
-- 循环中的 <code>iloc[i + 1]</code>；
-- <code>bars_ago(-N)</code>；
-- <code>rolling(..., center=True)</code>；
-- 用完整数据集最后一行反向修改历史信号；
-- 任何利用未来最高价、最低价或未来确认结果标记过去 bar 的写法。
+- 用 <code>request.security()</code> 读取仍在形成的高周期 bar 并把它当成最终值；
+- 在高周期读取上使用 <code>lookahead=barmerge.lookahead_on</code>，在产生该值的 bar 还不存在时就显示它；
+- 绘制依赖实时 close 的条件，然后把那个标记描述成历史事实；
+- 用 <code>barstate.islast</code> 改写更早的 bar 本应显示的内容；
+- 因为信号“本来应该”出现在那里，就把标记挪到更早的 bar。
 
-合法确认通常使用当前条件与上一根状态：
+诚实的交叉读取当前与上一根状态，并把事件闸在已收盘的 bar 上：
 
-~~~python
-cross_up = (
-    (ema_fast > ema_slow)
-    & (ema_fast.shift(1) <= ema_slow.shift(1))
-)
+~~~pine
+confirmedUp = ta.crossover(emaFast, emaSlow) and barstate.isconfirmed
 ~~~
 
-如果信号必须等当前 bar 收盘才能确定，转换成策略后应在下一根 bar 执行，不要为了让图形更漂亮而把信号提前。
+这会推迟事件到收线之后；它从不读取更晚的 bar。如果信号需要收盘确认，交易它的策略也会更晚执行。不要为了让图表或回测更好看而把信号往前挪。
 
 ---
 
-## 13. 沙箱与安全限制
+## 13. 语言限制与安全性
 
-允许的计算模块包括 numpy、pandas、math、json、datetime、time、collections、functools、itertools、statistics、decimal、fractions 和 copy。<code>pd</code> 与 <code>np</code> 已预置，通常无需 import。
+Pine study 做不了危险的事，剩下的约束说的是能表达什么，而不是被允许什么：
 
-禁止：
-
-- 网络、文件、数据库和子进程访问；
-- <code>eval</code>、<code>exec</code>、<code>compile</code>、<code>open</code>；
-- 反射、动态导入、dunder 逃逸和沙箱绕过；
-- pandas/numpy 的文件读取、写入和序列化方法；
-- <code>os</code>、<code>sys</code>、<code>requests</code>、<code>socket</code>、<code>subprocess</code>、<code>threading</code>、<code>sqlite3</code>、<code>pathlib</code>、<code>pickle</code>、<code>ctypes</code>、<code>operator</code> 等模块。
-
-指标验证有超时限制。避免无界循环、递归爆炸和逐行执行的高复杂度算法。
+- 没有文件系统、网络、数据库、进程或时钟访问。一切都来自图表的 bar 和脚本的输入。
+- import 只能解析到随运行时提供的来源。解析不到的 import 会让整段脚本失败。
+- 每个文件只有一处 <code>indicator(...)</code> 或 <code>strategy(...)</code> 声明。
+- 没有账户、订单、持仓或组合状态。<code>strategy.*</code> 调用合法，但在浏览器里没有可作用的对象。
+- 编译器就是闸门。不能编译的源码在保存时被 HTTP 400 拒绝，永远不会到达图表。
+- 保持逐 bar 计算有界。每根 bar 都在大数组上循环的脚本是正确的，但很慢，预览和告警重放都要为它付出代价。
 
 ---
 
 ## 14. 完整教程：双 EMA 交叉指标
 
-~~~python
-# @param fast_len int 12 Fast EMA period range=5:30:1
-# @param slow_len int 26 Slow EMA period range=10:80:2
-# @param confirm_next_bar bool false Show markers one bar after confirmation
-# @param show_marks bool true Show crossover markers
+~~~pine
+//@version=6
+// Dual EMA Viewer — chart-only study. Visual markers, no order logic.
 
-my_indicator_name = "Dual EMA Viewer"
-my_indicator_description = "Displays two EMAs and marks confirmed crossover events."
+indicator("Dual EMA Viewer", overlay=true)
 
-df = df.copy()
+// ===== Settings =====
+fastLen = input.int(12, "Fast EMA length", minval=5, maxval=30, step=1, group="Parameters", tooltip="Bars used by the fast EMA.")
+slowLen = input.int(26, "Slow EMA length", minval=10, maxval=80, step=2, group="Parameters", tooltip="Bars used by the slow EMA.")
+showMarks = input.bool(true, "Show crossover markers", group="Visuals")
+showLabels = input.bool(false, "Label each crossover", group="Visuals")
+fastColor = input.color(#22C55E, "Fast EMA color", group="Visuals")
+slowColor = input.color(#3B82F6, "Slow EMA color", group="Visuals")
 
-fast_len = int(params.get("fast_len", 12))
-slow_len = int(params.get("slow_len", 26))
-confirm_next_bar = bool(params.get("confirm_next_bar", False))
-show_marks = bool(params.get("show_marks", True))
+// ===== Calculation =====
+emaFast = ta.ema(close, fastLen)
+emaSlow = ta.ema(close, slowLen)
 
-close = df["close"]
-high = df["high"]
-low = df["low"]
+// A crossover is a one-bar event. A continuous condition would mark every bar
+// of the trend, and an alert on it would fire on every one of those bars.
+golden = ta.crossover(emaFast, emaSlow)
+death = ta.crossunder(emaFast, emaSlow)
 
+// Only count the event once the bar has closed, so the study does not repaint.
+confirmedGolden = golden and barstate.isconfirmed
+confirmedDeath = death and barstate.isconfirmed
 
-def edge(condition):
-    current = condition.fillna(False).astype(bool)
-    previous = current.shift(1, fill_value=False).astype(bool)
-    return current & ~previous
+// ===== Drawing =====
+plot(emaFast, "EMA Fast", color=fastColor, linewidth=2)
+plot(emaSlow, "EMA Slow", color=slowColor, linewidth=2)
 
+plotshape(showMarks and confirmedGolden, "Long Entry", shape.triangleup, location.belowbar, #22C55E, size=size.small, text="L")
+plotshape(showMarks and confirmedDeath, "Long Exit", shape.triangledown, location.abovebar, #EF4444, size=size.small, text="X")
 
-def to_plot_list(series):
-    return [
-        None if pd.isna(value) else float(value)
-        for value in series
-    ]
+var label lastLabel = na
 
+if showLabels and confirmedGolden
+    if not na(lastLabel)
+        label.delete(lastLabel)
+    lastLabel := label.new(bar_index, low, "Golden cross", style=label.style_label_up, color=#22C55E, textcolor=#FFFFFF)
 
-ema_fast = close.ewm(span=fast_len, adjust=False).mean()
-ema_slow = close.ewm(span=slow_len, adjust=False).mean()
-
-golden = edge(ema_fast > ema_slow)
-death = edge(ema_fast < ema_slow)
-
-if confirm_next_bar:
-    golden = golden.shift(1, fill_value=False).astype(bool)
-    death = death.shift(1, fill_value=False).astype(bool)
-
-golden_marks = [
-    float(low.iloc[i] * 0.995)
-    if show_marks and bool(golden.iloc[i])
-    else None
-    for i in range(len(df))
-]
-
-death_marks = [
-    float(high.iloc[i] * 1.005)
-    if show_marks and bool(death.iloc[i])
-    else None
-    for i in range(len(df))
-]
-
-output = {
-    "name": my_indicator_name,
-    "plots": [
-        {
-            "name": "EMA Fast",
-            "data": to_plot_list(ema_fast),
-            "color": "#22C55E",
-            "type": "line",
-            "overlay": True,
-        },
-        {
-            "name": "EMA Slow",
-            "data": to_plot_list(ema_slow),
-            "color": "#3B82F6",
-            "type": "line",
-            "overlay": True,
-        },
-    ],
-    "signals": [
-        {
-            "type": "buy",
-            "text": "Long Entry",
-            "color": "#22C55E",
-            "data": golden_marks,
-        },
-        {
-            "type": "sell",
-            "text": "Long Exit",
-            "color": "#EF4444",
-            "data": death_marks,
-        },
-    ],
-    "layers": [],
-}
+// ===== Alerts =====
+alertcondition(confirmedGolden, "Golden cross", "EMA fast crossed above slow on a closed bar")
+alertcondition(confirmedDeath, "Death cross", "EMA fast crossed below slow on a closed bar")
 ~~~
 
-逐步理解：
+它是怎么工作的：
 
-1. 参数声明决定参数面板和搜索范围。
-2. <code>params.get</code> 读取与声明完全一致的默认值。
-3. 两条 EMA 是持续状态，因此放进 plots。
-4. 金叉和死叉是一次性事件，因此经过 <code>edge</code> 后放进 signals。
-5. 空标记使用 <code>None</code>。
-6. 指标明确把死叉命名为 “Long Exit”，避免转换策略时误解成开空。
+1. 声明给出 study 名字，并说明它叠加在价格上绘制。
+2. 每个可调值都是 <code>input.*</code>，所以设置面板会由源码自行构建，带上这里写的范围和帮助文本。
+3. EMA 是持久序列，所以用 plot 绘制。
+4. 交叉是单根 bar 事件，所以用标记，并且两者都闸在 <code>barstate.isconfirmed</code> 上。
+5. 标记命名为 “Long Entry” 和 “Long Exit”。看空标记是离场，不是自动开空——那个决定属于转换，不属于绘制。
+6. 告警条件是声明。它们负责通知，不负责交易。
+7. 脚本里任何地方都没有订单、持仓或回测。
+
+把同一个 study 打开在另一个标的和周期上：代码没有指定其中任何一个，因为图表提供它们。
 
 ---
 
 ## 15. 验证、调试和常见错误
 
-建议每次按以下顺序：
+每次有意义的修改之后按这个流程走：
 
-1. 保存版本。
-2. 运行/预览指标。
-3. 执行代码验证。
-4. 检查图上起始空值、极端行情和短数据区间。
-5. 修改参数，确认参数确实影响结果。
-6. 检查信号是否只在事件 bar 出现。
+1. 在 Indicator IDE 里粘贴或修改源码。
+2. 保存。服务端编译源码；语法错误会以 HTTP 400 <code>Invalid Pine Script: &lt;reason&gt;</code> 返回，并带上出错行。
+3. 在图表上打开 study，检查绘制结果。
+4. 改一个输入，确认绘制随之变化。
+5. 确认标记只出现在事件 bar 上，而不是趋势的每一根 bar 上。
+6. 挂一个告警条件，确认它在你预期的 bar 上触发。
 
-| 提示或错误 | 原因 | 修复 |
+IDE 在编辑过程中还会报告非阻断的质量提示。它们描述结构，不描述数值：
+
+| 提示 | 级别 | 含义 | 如何消除 |
+| --- | --- | --- | --- |
+| <code>EMPTY_CODE</code> | error | 源码为空 | 提供完整脚本 |
+| <code>MISSING_PINE_VERSION</code> | warn | 缺少 <code>//@version=</code> 行 | 把 <code>//@version=6</code> 放在第一行 |
+| <code>UNSUPPORTED_PINE_VERSION</code> | error | 声明的版本低于 5 | 把源码改写成版本 5 或更高 |
+| <code>UNKNOWN_PINE_VERSION</code> | warn | 声明的版本高于 6 | 以 6 为目标，那是运行时实现的版本 |
+| <code>PINE_SYNTAX_ERROR</code> | error | 解析器拒绝了源码 | 修正报告的行；消息里带位置 |
+| <code>MISSING_SCRIPT_DECLARATION</code> | warn | 没有 <code>indicator(...)</code> 或 <code>strategy(...)</code> 调用 | 在独立一行加上恰好一处声明 |
+| <code>MISSING_SCRIPT_TITLE</code> | info | 声明没有标题 | 把 study 名字作为第一个参数传入 |
+| <code>SCRIPT_IS_A_STRATEGY</code> | info | 源码声明了 <code>strategy(...)</code> | 对策略而言是预期的；图表 study 应声明 <code>indicator(...)</code> |
+| <code>NO_PLOTS_DECLARED</code> | warn | 脚本什么都没画 | 加上 <code>plot</code>、<code>plotshape</code>、<code>fill</code>、<code>hline</code>、<code>bgcolor</code> 或 <code>barcolor</code> 调用 |
+
+级别为 <code>warn</code> 和 <code>info</code> 的提示不阻断保存。级别为 <code>error</code> 的会：源码不会被存储，响应里带回原因。
+
+不属于提示的常见故障：
+
+| 现象 | 原因 | 处理 |
 | --- | --- | --- |
-| <code>EMPTY_CODE</code> | 代码为空 | 提供完整指标源码 |
-| <code>MISSING_OUTPUT</code> | 没有设置 <code>output</code> | 添加字典输出 |
-| <code>MissingOutput</code> | 执行后未得到输出变量 | 检查分支和变量作用域 |
-| <code>InvalidOutputType</code> | <code>output</code> 不是字典 | 改为 dict |
-| <code>InvalidOutputStructure</code> | plots/signals 键都不存在 | 至少提供其中一个 |
-| <code>LengthMismatch</code> | 序列长度与 K 线不一致 | 让每个 data 等于 <code>len(df)</code> |
-| <code>MISSING_DF_COPY</code> | 缺少工作副本 | 在计算前添加 <code>df = df.copy()</code> |
-| <code>PARAM_DEFAULT_MISMATCH</code> | 声明和读取默认值不同 | 对齐两个默认值 |
-| <code>DECLARED_PARAMS_NOT_READ_VIA_PARAMS_GET</code> | 声明后没有读取 | 显式调用 <code>params.get</code> |
-| <code>EXECUTION_COLUMNS_IGNORED_FOR_INDICATOR</code> | 指标中写了交易执行列 | 删除并转换成 V2 策略 |
-| <code>STRATEGY_ANNOTATIONS_IGNORED_FOR_INDICATOR</code> | 使用旧策略注解 | 删除旧注解 |
-| <code>NDARRAY_PANDAS_METHOD_MISUSE</code> | ndarray 被当作 Series | 用 pandas 写法或包装并保留索引 |
-| <code>FUTURE_DATA_LEAK</code> | 检测到未来数据 | 改为只使用当前和历史数据 |
+| 每根 bar 都有标记 | 条件描述的是状态，不是事件 | 使用 <code>ta.crossover</code> / <code>ta.crossunder</code> |
+| 每根 bar 都告警 | 同样是把状态当条件 | 把告警建在单根 bar 事件上 |
+| “找不到声明” | 版本行不在第一行，或声明被缩进、被换行 | 第一行、行首、一行内 |
+| 面板里缺少字段 | input 没有标题 | 给 input 加标题 |
+| 字段没有默认值 | 默认值是表达式而不是字面量 | 使用字面量默认值 |
+| 线穿过零值 | 把断点画成了 <code>0</code> | 断点绘制 <code>na</code> |
+| 最后一根 bar 上数值会变 | 脚本读取了实时值 | 用 <code>barstate.isconfirmed</code> 加闸 |
 
 ---
 
 ## 16. 转换成策略前的语义清单
 
-转换前明确回答：
+转换之前先回答这些问题：
 
 - 哪个标记是多头入场？
 - 哪个标记是多头离场？
-- 是否真的需要做空？看空离场不能自动等同于做空入场。
-- 是否需要反手？如果需要，平仓和反向开仓是否为两个独立动作？
-- 信号在哪个周期、哪根已收盘 bar 确认？
-- 是否允许重复入场、加仓或减仓？
-- 仓位大小、止损、止盈和追踪止损如何定义？
-- 交易标的和市场类型是什么？
-- 如果是交易所股票，执行使用哪个准确的目录产品、交易所、币种、产品类型和 API family？必须保留 <code>Crypto:00700/HKD@gate:spot</code> 或目录确认的 <code>Crypto:HK0700/USDT@binance:swap</code> 等完整标识，不能替换成底层股票。
-- 它是只做多的股票现货，还是必须声明方向 metadata 和 <code>position_side</code> 的 Crypto swap 衍生品？
+- 是否真的需要做空？看空离场并不自动等于开空入场。
+- 是否需要反手？如果需要，平仓和反向开仓是两个独立动作吗？
+- 信号在哪个周期、哪根已完成的 bar 上确认？
+- 是否允许重复入场、分批建仓或分批减仓？
+- 仓位、止损、止盈和移动保护应该如何工作？
+- 策略将拥有哪个标的、哪种市场类型？
+- 如果是交易所股票，执行到底使用哪个目录产品、场所、币种、产品类型和 API 家族？保留 <code>Crypto:00700/HKD@gate:spot</code> 这样的标的，或经目录确认的 <code>Crypto:HK0700/USDT@binance:swap</code>，不要用它的底层股票替换它（API family 是产品契约里的标识符，翻译后无法与代码对上）。
+- 该产品是只做多的现货股票，还是需要显式方向元数据和 <code>position_side</code> 的 Crypto 永续合约？
 
-转换后应删除图表专用的颜色、标签偏移、plots、layers 和 marker 数组，保留信号代数，并用 Strategy API V2 明确声明标的、周期、仓位和风险。
+转换后的策略会丢掉纯图表的部分：颜色、plot 样式、offset、标记、label 和 fill。保留信号代数——条件以及它们触发的那根 bar——并用 Strategy API V2 显式声明标的、频率、仓位和风险。如果原 study 本身已经用了 <code>strategy(...)</code> 并且条件写成了策略入场，那么转换主要是把那份源码搬到策略侧。
 
-只有当前产品目录提供有效 <code>USStock</code> 或 <code>HKStock</code> 映射时，底层股票数据才能用于图表历史行情和时点基本面。数据映射不会改变执行标的，转换器也不能根据显示名称猜测地区。
+底层股票数据只有在活动目录提供有效 <code>USStock</code> 或 <code>HKStock</code> 映射时，才能支撑图表历史和点时基本面。该数据映射从不改变执行标的，转换器也不得根据显示名去猜区域。
 
-生成的策略必须重新验证和回测。发布到市场前，系统要求至少有一条成功回测记录。
+生成的策略代码始终要重新验证和回测。上架市场要求至少一条成功的回测记录。
 
 ---
 
 ## 17. 发布前检查清单
 
-- [ ] 名称和描述存在，且不包含收益承诺。
-- [ ] 代码注释、标识符、元数据和默认标签为英文。
-- [ ] <code>df = df.copy()</code> 已执行。
-- [ ] 每个参数都通过 <code>params.get</code> 读取，默认值一致。
-- [ ] 不包含订单、仓位、杠杆或交易风控代码。
-- [ ] <code>output</code> 是字典。
-- [ ] 每个 plot/signal data 长度都等于 <code>len(df)</code>。
-- [ ] 缺失值使用 <code>None</code>，没有 NaN 或无穷值输出。
-- [ ] signals 表示稀疏事件，持续状态放在 plots 或少量 layers。
-- [ ] 不读取未来数据。
-- [ ] numpy 结果在调用 pandas 方法前已转换成带正确索引的 Series。
-- [ ] 短数据、预热区和异常参数不会导致崩溃。
-- [ ] 已保存版本并通过预览与验证。
+- [ ] 第一行是 <code>//@version=6</code>（若目标是 v5，则为 <code>//@version=5</code>）。
+- [ ] 只有一处 <code>indicator(...)</code> 声明，标题能说明这个 study 是什么。
+- [ ] study 有绘制内容：一条线、一个标记、一次填充或一条水平位。
+- [ ] 每个可调值都是带标题的 <code>input.*</code>，数值 input 带有合理的 <code>minval</code>/<code>maxval</code>/<code>step</code>。
+- [ ] 注释、标识符、input 标题和 plot 标题使用英文。
+- [ ] 标记是基于 <code>ta.crossover</code> / <code>ta.crossunder</code> 的单根 bar 事件，不是持久状态。
+- [ ] 任何读取实时值的逻辑都用 <code>barstate.isconfirmed</code> 加闸。
+- [ ] 高周期读取使用 <code>request.security()</code> 且不带 <code>lookahead_on</code>。
+- [ ] 没有任何订单、持仓、杠杆或执行风险逻辑。
+- [ ] 缺失值用 <code>na</code>；没有用 <code>0</code> 之类的哨兵值代替断点。
+- [ ] 没有读取未来数据：没有实时高周期值，没有改写过去的 bar。
+- [ ] 短数据集、预热期和异常参数不会让预览崩溃。
+- [ ] 脚本保存时没有 <code>error</code> 级别的提示，图表预览画出的内容与描述一致。

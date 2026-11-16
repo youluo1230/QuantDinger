@@ -1,69 +1,58 @@
-"""Tests for default indicator template builder."""
+"""The starter template is the first thing a new author sees.
 
-from app.services.indicator_code_quality import analyze_indicator_code_quality
+It is also what the IDE writes when the model is unavailable, so it has to be
+valid Pine on its own: a template that does not compile would make a fresh
+indicator fail before its author typed anything.
+"""
+
 from app.services.indicator_default_template import build_default_indicator_template
-from app.utils.safe_exec import build_safe_builtins, safe_exec_with_validation
-
-import numpy as np
-import pandas as pd
-
-
-def _mock_df(length: int = 120) -> pd.DataFrame:
-    close = 10000 * np.exp(np.cumsum(np.random.normal(0, 0.002, length)))
-    return pd.DataFrame(
-        {
-            "open": close,
-            "high": close * 1.001,
-            "low": close * 0.999,
-            "close": close,
-            "volume": np.full(length, 1000.0),
-        }
-    )
+from app.services.pine_validation import (
+    analyze_pine_quality,
+    extract_indicator_meta,
+    validate_pine_source,
+)
 
 
-def test_default_template_has_no_execution_columns():
+def test_default_template_is_valid_pine():
     code = build_default_indicator_template()
-    for col in ("open_long", "close_long", "open_short", "close_short"):
-        assert f"df[\"{col}\"]" not in code
-        assert f"df['{col}']" not in code
-    assert "# @strategy" not in code
-    assert "signal_form" not in code
+    verdict = validate_pine_source(code)
+    assert verdict["success"], verdict["details"]
 
 
-def test_default_template_passes_quality_hints():
+def test_default_template_declares_the_study_and_its_settings():
     code = build_default_indicator_template()
-    hints = analyze_indicator_code_quality(code)
-    codes = {h["code"] for h in hints}
-    assert "MISSING_BUY_SELL_COLUMNS" not in codes
-    assert "MISSING_OUTPUT" not in codes
-    assert "EXECUTION_COLUMNS_IGNORED_FOR_INDICATOR" not in codes
-    assert "STRATEGY_ANNOTATIONS_IGNORED_FOR_INDICATOR" not in codes
+    meta = extract_indicator_meta(code)
+    assert meta["name"]
+
+    codes = {hint["code"] for hint in analyze_pine_quality(code)}
+    # The template is the reference the author copies, so it must not trip any
+    # of the warnings a hand-written script would be flagged for.
+    assert "MISSING_PINE_VERSION" not in codes
+    assert "MISSING_SCRIPT_DECLARATION" not in codes
+    assert "NO_PLOTS_DECLARED" not in codes
+    assert "SCRIPT_IS_A_STRATEGY" not in codes
 
 
-def test_default_template_executes_in_sandbox():
+def test_default_template_has_no_python_runtime_left():
     code = build_default_indicator_template()
-    df = _mock_df()
-    env = {
-        "df": df.copy(),
-        "pd": pd,
-        "np": np,
-        "params": {},
-        "output": None,
-        "__builtins__": build_safe_builtins(),
-    }
-    result = safe_exec_with_validation(code=code, exec_globals=env, exec_locals=env, timeout=15)
-    assert result.get("success"), result.get("error")
-    out = env.get("output")
-    assert isinstance(out, dict)
-    assert out.get("plots")
-    assert out.get("signals")
-    executed = env["df"]
-    for col in ("open_long", "close_long", "open_short", "close_short"):
-        assert col not in executed.columns
+    for token in ("df[", "params.get", "output =", "my_indicator_name", "# @param"):
+        assert token not in code
+    # The execution columns belong to strategies; a chart study that mentions
+    # them would suggest the indicator trades.
+    for column in ("open_long", "close_long", "open_short", "close_short"):
+        assert column not in code
 
 
-def test_default_template_uses_boolean_dtype_safe_edge_detection():
+def test_default_template_uses_inputs_rather_than_hardcoded_periods():
     code = build_default_indicator_template()
+    # Every period in the template must be adjustable from the settings dialog.
+    assert "input.int(" in code
+    assert "ta.ema(close, fastPeriod)" in code
+    assert "ta.ema(close, slowPeriod)" in code
 
-    assert "shift(1, fill_value=False).astype(bool)" in code
-    assert "shift(1).fillna(False)" not in code
+
+def test_default_template_marks_one_bar_events():
+    code = build_default_indicator_template()
+    # A continuous state would light up every bar and repeat the alert.
+    assert "ta.crossover(" in code
+    assert "ta.crossunder(" in code

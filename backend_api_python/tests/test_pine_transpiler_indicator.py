@@ -143,4 +143,47 @@ def test_an_inline_input_stays_out_of_the_strategy_entry_point():
 
     assert "def initialize(" not in result.code
     assert "def handle_data(" not in result.code
+
+
+def test_a_plot_kept_in_a_variable_still_draws():
+    """``line = plot(x)`` must record a line, not vanish into an unbound name.
+
+    Keeping the handle is how a script fills the gap between two plots, so a
+    converter that only collected ``plot`` as a standalone statement dropped the
+    line entirely (``call_dropped:plot``) and left ``fill`` with nothing to
+    attach to. This is the shape 61 of the 129 stored scripts use.
+    """
+    source = """
+//@version=6
+indicator("Handle probe", overlay = true)
+fast = ta.ema(close, 12)
+slow = ta.ema(close, 26)
+fastLine = plot(fast, "Fast")
+slowLine = plot(slow, "Slow")
+fill(fastLine, slowLine, color = color.new(color.blue, 80))
+"""
+    result, output = _run(source)
+
+    plots = output.get("plots") or []
+    assert [plot.get("name") for plot in plots] == ["Fast", "Slow"]
+    for plot in plots:
+        assert len(plot.get("data") or []) == 180
+        assert sum(1 for value in plot.get("data") or [] if value is not None) > 100
+    assert "call_dropped:plot" not in (result.warnings or [])
+
+
+def test_a_plot_handle_survives_when_it_is_assigned_inside_a_branch():
+    """The handle form must work wherever the assignment appears."""
+    source = """
+//@version=6
+indicator("Branch handle probe", overlay = true)
+basis = ta.sma(close, 20)
+showBasis = input.bool(true, "Show basis")
+lineRef = plot(showBasis ? basis : na, "Basis")
+"""
+    result, output = _run(source)
+
+    plots = output.get("plots") or []
+    assert [plot.get("name") for plot in plots] == ["Basis"]
+    assert sum(1 for value in plots[0].get("data") or [] if value is not None) > 50
     assert "_qd_replay(df, _qd_params)" in result.code

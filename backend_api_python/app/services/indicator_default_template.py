@@ -1,4 +1,9 @@
-"""Canonical default chart indicator template for QuantDinger."""
+"""Canonical default chart indicator template for QuantDinger.
+
+The IDE authors Pine Script and the browser runs it, so the starter must be a
+Pine study. It is also the fallback when the LLM is unavailable, which means a
+user who never configured a model still gets something that draws.
+"""
 
 from __future__ import annotations
 
@@ -8,75 +13,39 @@ def build_default_indicator_template(
     name: str = "EMA Chart Indicator Template",
     description: str = "EMA crossover chart indicator with visual markers only.",
 ) -> str:
-    """EMA crossover chart starter used when LLM generation is unavailable."""
+    """EMA crossover Pine study used as the starter and the offline fallback."""
     safe_name = (name or "EMA Chart Indicator Template").replace("\\", "\\\\").replace('"', '\\"')
     safe_desc = (description or "").replace("\\", "\\\\").replace('"', '\\"')
-    return f'''# ============================================================
-# QuantDinger default chart indicator template
-# ------------------------------------------------------------
-# Indicators are chart-only. They do not open, close, size, or manage trades.
-# Convert an indicator to a script strategy before backtesting or live trading.
-# ============================================================
+    return f'''//@version=6
+// ============================================================
+// QuantDinger default chart indicator template
+// ------------------------------------------------------------
+// Indicators are chart-only. They do not open, close, size, or manage trades.
+// Convert an indicator to a strategy before backtesting or live trading.
+// ============================================================
+indicator("{safe_name}", overlay = true)
 
-my_indicator_name = "{safe_name}"
-my_indicator_description = "{safe_desc}"
+// {safe_desc}
 
-# ===== Tunable parameters; always read them via params.get =====
-# @param fast_period int 10 Fast EMA period
-# @param slow_period int 30 Slow EMA period
+// ===== Tunable settings; every one appears in the indicator settings dialog =====
+fastPeriod = input.int(10, "Fast EMA period", minval = 1, group = "Periods")
+slowPeriod = input.int(30, "Slow EMA period", minval = 2, group = "Periods")
+showMarkers = input.bool(true, "Show crossover markers", group = "Visuals")
 
-def edge(s):
-    """Return True only on the bar where a condition flips from false to true."""
-    s = s.fillna(False).astype(bool)
-    previous = s.shift(1, fill_value=False).astype(bool)
-    return s & ~previous
+emaFast = ta.ema(close, fastPeriod)
+emaSlow = ta.ema(close, slowPeriod)
 
+plot(emaFast, "EMA Fast", color = #FF9800, linewidth = 2)
+plot(emaSlow, "EMA Slow", color = #3F51B5, linewidth = 2)
 
-fast_period = int(params.get("fast_period", 10))
-slow_period = int(params.get("slow_period", 30))
+// A crossover is a one-bar event: mark the bar the state changed, not every bar
+// the state persists, so notifications do not repeat.
+golden = ta.crossover(emaFast, emaSlow)
+death = ta.crossunder(emaFast, emaSlow)
 
-df = df.copy()
+plotshape(showMarkers and golden, "Golden cross", shape.triangleup, location.belowbar, #00E676, size = size.small)
+plotshape(showMarkers and death, "Death cross", shape.triangledown, location.abovebar, #FF5252, size = size.small)
 
-ema_fast = df["close"].ewm(span=fast_period, adjust=False).mean()
-ema_slow = df["close"].ewm(span=slow_period, adjust=False).mean()
-
-def plot_list(s):
-    """Convert warm-up NaN to None so price overlays do not draw fake zero lines."""
-    return [None if pd.isna(v) else float(v) for v in s]
-
-golden = (ema_fast > ema_slow) & (ema_fast.shift(1) <= ema_slow.shift(1))
-death = (ema_fast < ema_slow) & (ema_fast.shift(1) >= ema_slow.shift(1))
-golden_edge = edge(golden)
-death_edge = edge(death)
-
-n = len(df)
-golden_marks = [
-    df["low"].iloc[i] * 0.995 if bool(golden_edge.iloc[i]) else None for i in range(n)
-]
-death_marks = [
-    df["high"].iloc[i] * 1.005 if bool(death_edge.iloc[i]) else None for i in range(n)
-]
-
-output = {{
-    "name": my_indicator_name,
-    "plots": [
-        {{
-            "name": f"EMA{{fast_period}}",
-            "data": plot_list(ema_fast),
-            "color": "#FF9800",
-            "overlay": True,
-        }},
-        {{
-            "name": f"EMA{{slow_period}}",
-            "data": plot_list(ema_slow),
-            "color": "#3F51B5",
-            "overlay": True,
-        }},
-    ],
-    "signals": [
-        {{"type": "buy", "text": "Golden", "data": golden_marks, "color": "#00E676"}},
-        {{"type": "sell", "text": "Death", "data": death_marks, "color": "#FF5252"}},
-    ],
-    "layers": [],
-}}
+alertcondition(golden, "Golden cross", "EMA fast crossed above slow")
+alertcondition(death, "Death cross", "EMA fast crossed below slow")
 '''

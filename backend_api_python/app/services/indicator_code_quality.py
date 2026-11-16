@@ -1,8 +1,14 @@
 """
-Heuristic quality hints for QuantDinger indicator Python code.
+Heuristic quality hints for chart indicator source.
 
-Read-only analysis: chart indicator structure checks and common pandas pitfalls.
-Does not execute user code.
+Read-only analysis of the structure a script declares. It started life against
+the retired Python indicator contract -- ``my_indicator_name``, ``df``,
+``output``, ``# @param`` -- and those checks still run for the legacy rows that
+remain in the database, which is why the wording mentions both dialects.
+
+Indicators are Pine now, and the Pine-aware hints live in
+``app/services/pine_validation.py`` (``analyze_pine_quality``); the save path and
+the IDE's quality panel use that module. Nothing here executes user code.
 """
 
 from __future__ import annotations

@@ -536,7 +536,7 @@ not include credentials, account data, or exploitable details in public issues.
 
 | Area | Current surface |
 | --- | --- |
-| Indicators | Python chart overlays, markers, bands, and signals. |
+| Indicators | Pine Script v6 chart overlays, markers, and signals, run in the browser. |
 | Strategies | Strategy API V2 intents, sizing, risk, backtests, and live runtime. |
 | Crypto | Binance, OKX, Bitget, Bybit, Gate, HTX, and adapter extensions. |
 | Traditional brokers | IBKR and Alpaca workflows. |

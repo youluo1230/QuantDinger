@@ -69,7 +69,7 @@ def test_indicator_generator_treats_an_empty_editor_as_a_new_native_indicator():
     source = contract_path.read_text(encoding="utf-8")
     assert "empty or missing existing source as a normal new-indicator state" in source
     assert "Never ask the user to repeat, reconfirm, or restate" in source
-    assert "translate the requested behavior into this native Python contract" in source
+    assert "translate the behaviour into Pine rather than returning that language" in source
 
 
 def test_indicator_ai_generation_keeps_candidate_separate_from_saved_code():

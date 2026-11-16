@@ -155,7 +155,7 @@ ownership or shared state.
 - [Live-trading safety](trading/LIVE_TRADING_SAFETY.md)
 - [Public universes and point-in-time fundamentals (Chinese)](trading/PUBLIC_UNIVERSE_AND_FUNDAMENTALS_CN.md)
 - [Fundamental-data preparation operations (Chinese)](strategies/FUNDAMENTAL_DATA_PREPARATION_CN.md)
-- Runnable examples in [`examples/`](examples/)
+- Runnable examples in [`examples/`](examples/) (Pine studies for the Indicator IDE, Python for the Strategy API)
 
 ### APIs and agents
 

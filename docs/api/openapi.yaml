@@ -4428,12 +4428,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HumanSuccessEnvelope'
-      summary: Return declared `# @param` fields for an indicator.
-      description: "Used by the strategy builder to render a parameter form.\n\nQuery\
-        \ params:\n    indicator_id: Indicator ID\n\nReturns:\n    params: [\n   \
-        \     {\n            \"name\": \"ma_fast\",\n            \"type\": \"int\"\
-        ,\n            \"default\": 5,\n            \"description\": \"Fast MA period\"\
-        \n        },\n        ...\n    ]"
+      summary: Return the `input.*` settings an indicator script declares.
+      description: "Used by the strategy builder and the indicator IDE to render a parameter\n\
+        form.\n\nQuery params:\n    indicator_id: Indicator ID\n\nReturns the declarations\
+        \ in source order, read out of the Pine source:\n    params: [\n        {\n\
+        \            \"name\": \"Fast length\",\n            \"type\": \"int\",\n\
+        \            \"default\": 12,\n            \"description\": \"\",\n\
+        \            \"group\": \"01 — Parameters\",\n            \"pine_input_id\":\
+        \ \"in_0\",\n            \"pine_var_id\": \"fastLen\",\n            \"min\":\
+        \ 1,\n            \"max\": 500\n        },\n        ...\n    ]\n\nA default\
+        \ written as a constant (`input.int(FAST_DEFAULT, ...)`) is resolved from the\n\
+        script's own `const` declarations. A default that is an expression has no literal\n\
+        value and is reported as null."
       tags:
       - Indicator
       operationId: getApiIndicatorGetIndicatorParams
@@ -4455,6 +4461,11 @@ paths:
                 $ref: '#/components/schemas/HumanSuccessEnvelope'
       summary: Return candles, indicator plots, and visual signals without creating
         a task.
+      description: "The server-side counterpart of the browser chart: it transpiles\
+        \ the Pine source and\n    runs it in the sandbox, which is what alerts and\
+        \ API consumers use.\n\n    The chart in the Indicator IDE does not call this\
+        \ endpoint -- it runs the Pine source\n    locally -- so a preview here and\
+        \ a chart there can cost very different amounts of time."
       tags:
       - Indicator
       operationId: postApiIndicatorChartPreview

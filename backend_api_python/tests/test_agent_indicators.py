@@ -51,14 +51,20 @@ def test_authoring_contract_ok(client, monkeypatch):
     assert body["code"] == 0
     data = body["data"]
     assert "starter_template" in data
-    assert "my_indicator_name" in data["starter_template"]
-    assert data["version"] == "indicator-contract-v2-chart-only"
+    # The starter is Pine now: a v6 header and the declaration that names the
+    # study are what make it loadable, so both are part of the contract.
+    assert "//@version=6" in data["starter_template"]
+    assert "indicator(" in data["starter_template"]
+    assert "df" not in data["starter_template"]
+    assert data["version"] == "indicator-contract-v3-pine-chart-only"
     assert "minimal_indicator_snippet" in data
     assert "minimal_backtest_snippet" not in data
     assert any("open_long" in item for item in data["forbidden"])
+    assert any("pandas" in item for item in data["forbidden"])
     assert "Indicator-to-Strategy" in " ".join(data["workflow"])
-    assert "Supported types are line, bar, circle, and cloud" in data["required_fields"]["plots"]
-    assert "repeated per-bar zone or box layers" in data["required_fields"]["plots"]
+    assert "plotshape" in data["required_fields"]["plots"]
+    assert "input.int/input.float" in data["required_fields"]["inputs"]
+    assert "no dataframe and no params dict" in data["required_fields"]["series"].lower()
 
 
 def test_save_indicator_requires_w_scope(client, monkeypatch):

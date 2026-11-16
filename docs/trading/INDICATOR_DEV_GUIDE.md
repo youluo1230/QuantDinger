@@ -1,15 +1,23 @@
 # QuantDinger Indicator Development Guide
 
-> Applies to: the current QuantDinger chart-indicator contract
-> Audience: first-time indicator authors, developers migrating Pine/TDX formulas, and reviewers of AI-generated code
+> Applies to: the QuantDinger chart-indicator contract, written in Pine Script v5/v6
+> Audience: first-time indicator authors, developers migrating a Python indicator or a TradingView script, and reviewers of AI-generated code
 
-A QuantDinger indicator is a Python chart program that runs in the Indicator IDE. It reads the current K-line DataFrame, calculates aligned series, and returns plots, markers, and sparse chart layers through <code>output</code>.
+A QuantDinger chart indicator is a Pine Script study. The Indicator IDE runs the source in the user's browser with PineTS, a Pine runtime written in TypeScript, and the source is stored verbatim in the indicator row (<code>qd_indicator_codes.code</code>). What the chart draws is what the browser executed: no chart-indicator value is computed on the server.
 
 The most important boundary is: **an indicator is for chart analysis, not trade execution.**
 
 An indicator cannot place orders, backtest, run live trading, read an account, manage positions, enable leverage, or execute stop-loss/take-profit rules. To trade an idea, convert its visual signals into a Strategy API V2 strategy, then verify, backtest, and deploy that strategy separately.
 
-The TradingView/Pine compatibility target is: **preserve the calculation and visual semantics of common single-symbol, single-timeframe indicators, not Pine syntax, every Pine API, or Pine's tick-by-tick execution model.** Pine migrations must rewrite formulas in Python/pandas and return the result through the <code>output</code> contract in this guide.
+Because the source is Pine, the language semantics are Pine's own: <code>ta.*</code> calculations, <code>[1]</code> history references, <code>var</code> persistence, <code>request.security()</code>, and <code>input.*</code> declarations behave the way they do on TradingView for the subset the browser runtime implements. What an indicator does not have here is an account, an order, or a position.
+
+Supported versions are **5 and 6**. The version directive must be the first line of the file:
+
+~~~pine
+//@version=6
+~~~
+
+Anything older than version 5 is refused before the script reaches the chart. A script that does not compile is refused at save time: <code>POST /api/indicator/saveIndicator</code> and the Agent Gateway save path answer HTTP 400 with <code>Invalid Pine Script: &lt;reason&gt;</code>. Saves are validated by the server's Pine compiler (<code>backend_api_python/app/services/pine_validation.py</code>, built on the <code>pynescript</code> parser), so a syntax error is reported where you can fix it rather than surfacing inside the chart.
 
 ---
 
@@ -17,41 +25,20 @@ The TradingView/Pine compatibility target is: **preserve the calculation and vis
 
 Paste this into the Indicator IDE and run it:
 
-~~~python
-my_indicator_name = "Close Line"
-my_indicator_description = "Displays the close price as a chart overlay."
+~~~pine
+//@version=6
+indicator("Close Line", overlay=true)
 
-df = df.copy()
-
-close_line = [
-    None if pd.isna(value) else float(value)
-    for value in df["close"]
-]
-
-output = {
-    "name": my_indicator_name,
-    "plots": [
-        {
-            "name": "Close",
-            "data": close_line,
-            "color": "#3B82F6",
-            "type": "line",
-            "overlay": True,
-        }
-    ],
-    "signals": [],
-    "layers": [],
-}
+plot(close, color=#3B82F6)
 ~~~
 
 This is the complete minimal contract:
 
-1. Declare display metadata.
-2. Create a working copy with <code>df = df.copy()</code>.
-3. calculate data aligned one-to-one with the K-line rows.
-4. Set the <code>output</code> dictionary.
+1. Declare the Pine version on the first line.
+2. Declare the study with <code>indicator("Close Line", overlay=true)</code>. The title becomes the saved indicator name, and <code>overlay=true</code> places it on the price chart instead of a separate pane.
+3. Draw with <code>plot()</code>. There is no output dictionary and no return value: the drawing calls are the output.
 
-For a new indicator, first draw one line, then add parameters, then event markers, and only then add advanced layers.
+For a new indicator, add one line first, then its <code>input.*</code> settings, then event markers, and only then drawing objects such as labels and boxes.
 
 ---
 
@@ -59,11 +46,11 @@ For a new indicator, first draw one line, then add parameters, then event marker
 
 | Artifact | Owns | Does not own |
 | --- | --- | --- |
-| Chart Indicator | plots, panes, lamp rows, visual markers, zones, labels | backtest, live trading, orders, positions, leverage, execution risk |
-| Strategy API V2 | subscriptions, signals, order intents, positions, backtest, live execution, protections | Indicator IDE <code>output</code> rendering |
+| Chart Indicator (Pine study) | plots, fills, markers, labels, boxes, alert conditions | backtest, live trading, orders, positions, leverage, execution risk |
+| Strategy API V2 | subscriptions, signals, order intents, positions, backtest, live execution, protections | chart rendering |
 | Indicator-to-Strategy | translating visual signal meaning into executable code | mixing order behavior into the source indicator |
 
-<code>output["signals"]</code> contains chart markers only. A <code>sell</code>-oriented “Death” marker may mean a long-exit warning or weakening conditions. It does not automatically open a short or reverse a position.
+A marker is a drawing, not a trade. A downward marker titled “Death” can mean a long exit warning or simply weakening conditions; it does not open a short and does not reverse a position.
 
 For a long-only conversion, the usual mapping is:
 
@@ -71,648 +58,435 @@ For a long-only conversion, the usual mapping is:
 - explicit bearish exit event → <code>close_long</code>
 - generate <code>open_short</code> only when the user explicitly requests shorting and provides a distinct bearish entry rule
 
-Do not create execution columns such as <code>open_long</code>, <code>close_long</code>, <code>open_short</code>, <code>close_short</code>, <code>add_long</code>, or <code>reduce_long</code> in an indicator. Do not use legacy <code># @strategy</code> annotations.
+Do not create execution columns such as <code>open_long</code>, <code>close_long</code>, <code>open_short</code>, <code>close_short</code>, <code>add_long</code>, or <code>reduce_long</code> in an indicator: those belong to Strategy API V2. There is also no <code># @strategy</code> annotation to write — an indicator has no annotation layer at all.
+
+A <code>strategy(...)</code> declaration is legal in the IDE, and the chart still draws its <code>plot()</code> output, but nothing is executed in the browser: a strategy's entries and exits only happen when the same source is backtested server-side. The save path reports that case as the <code>SCRIPT_IS_A_STRATEGY</code> hint, which is a note rather than an error.
 
 ---
 
-## 3. Runtime and input data
+## 3. Runtime: where the script runs and what it can read
 
-The runtime provides:
+The IDE executes the script in the browser. The server's role is to compile and validate the source on save, and to run the script separately for the two consumers that cannot use a browser.
 
-- <code>df</code>: a pandas DataFrame for the current chart, ordered oldest to newest, one row per bar.
-- <code>params</code>: a dict produced by merging declared defaults with values from the parameter panel.
-- <code>pd</code>: preloaded pandas.
-- <code>np</code>: preloaded numpy.
-- <code>open</code>, <code>high</code>, <code>low</code>, <code>close</code>, and <code>volume</code>: some runtime entries also expose convenience Series. Prefer explicit <code>df["close"]</code> access for clarity and portability.
-
-Standard OHLCV access:
-
-~~~python
-open_price = df["open"]
-high = df["high"]
-low = df["low"]
-close = df["close"]
-volume = df["volume"]
-~~~
-
-Important rules:
-
-- Do not assume a <code>time</code> column exists; time may already be the DataFrame index.
-- Do not rename or remove required OHLCV columns.
-- Check before using optional fields, for example <code>if "turnover" in df.columns:</code>.
-- Run <code>df = df.copy()</code> before mutations.
-- Prefer vectorized <code>rolling</code>, <code>ewm</code>, <code>shift</code>, and <code>where</code> operations for core series.
-
----
-
-## 4. Recommended file structure and metadata
-
-~~~python
-# @param period int 20 Calculation period
-
-my_indicator_name = "Example Indicator"
-my_indicator_description = "Explains what is drawn and how events are marked."
-
-df = df.copy()
-
-period = int(params.get("period", 20))
-
-# Helper functions
-# Series calculation
-# Marker construction
-
-output = {
-    "name": my_indicator_name,
-    "plots": [],
-    "signals": [],
-    "layers": [],
-}
-~~~
-
-Every indicator should declare:
-
-~~~python
-my_indicator_name = "Dual EMA Viewer"
-my_indicator_description = "Chart-only EMA crossover indicator with visual event markers."
-~~~
-
-Keep the name short and stable. The description should say:
-
-- what is calculated;
-- whether it appears on the price chart or a separate pane;
-- what each event marker means;
-- which parameters matter.
-
-Do not promise returns or imply live validation.
-
-Project source rules require English identifiers, metadata, comments, parameter descriptions, and default display labels. Localize display text only when a user explicitly requests a target language.
-
----
-
-## 5. Declaring parameters
-
-Syntax:
-
-~~~python
-# @param <name> <int|float|bool|str> <default> <description>
-~~~
-
-Example:
-
-~~~python
-# @param fast_len int 12 Fast EMA period
-# @param slow_len int 26 Slow EMA period
-# @param band_pct float 1.5 Channel width percent
-# @param show_marks bool true Show crossover markers
-# @param source str close Price source
-~~~
-
-A declaration does not create a Python variable. Read every value explicitly:
-
-~~~python
-fast_len = int(params.get("fast_len", 12))
-slow_len = int(params.get("slow_len", 26))
-band_pct = float(params.get("band_pct", 1.5))
-show_marks = bool(params.get("show_marks", True))
-source = str(params.get("source", "close"))
-~~~
-
-Contract rules:
-
-- Declare one parameter per line.
-- Use valid Python identifiers for names.
-- Use only <code>int</code>, <code>float</code>, <code>bool</code>, <code>str</code>, or <code>string</code>.
-- The declared default must match the <code>params.get</code> fallback after type conversion.
-- Write booleans as <code>true</code>/<code>false</code> in declarations and <code>True</code>/<code>False</code> in Python.
-- A string default cannot contain spaces because it is parsed as one token.
-
-Declare search candidates at the end of the description:
-
-~~~python
-# @param period int 20 Lookback period range=5:60:5
-# @param multiplier float 2.0 Band multiplier values=1.5,2.0,2.5,3.0
-~~~
-
-<code>range=start:end:step</code> produces an inclusive arithmetic sequence. <code>values=a,b,c</code> declares an explicit list. One parameter expands to at most 1,024 values. Range markers are removed from the human-facing description.
-
-Indicator parameters control calculations and display only. Do not declare account, symbol, timeframe, position, leverage, stop-loss, or take-profit settings.
-
----
-
-## 6. The output contract
-
-The program must finish by setting a dict named <code>output</code>:
-
-~~~python
-output = {
-    "name": my_indicator_name,
-    "plots": plots,
-    "signals": signals,
-    "layers": layers,
-}
-~~~
-
-Optional:
-
-~~~python
-output["calculatedVars"] = {}
-~~~
-
-Validation rules:
-
-- <code>output</code> must be a dict.
-- At least the <code>plots</code> or <code>signals</code> key must exist.
-- Every <code>plot["data"]</code> must have length <code>len(df)</code>.
-- Every <code>signal["data"]</code> must have length <code>len(df)</code>.
-- Do not emit NaN, positive infinity, or negative infinity; use <code>None</code> for missing points.
-- Layers do not need per-bar arrays, but indices, times, and prices must be meaningful for the current data.
-
-Explicit empty lists are recommended:
-
-~~~python
-output = {
-    "name": my_indicator_name,
-    "plots": [],
-    "signals": [],
-    "layers": [],
-}
-~~~
-
----
-
-## 7. plots: price overlays and pane series
-
-Each plot normally contains:
-
-| Field | Type | Meaning |
+| Path | Runs | Purpose |
 | --- | --- | --- |
-| <code>name</code> | str | legend and series name |
-| <code>data</code> | list | values/<code>None</code>, length <code>len(df)</code> |
-| <code>color</code> | str | preferably <code>#RRGGBB</code> |
-| <code>overlay</code> | bool | <code>True</code> on price chart, <code>False</code> in a pane |
-| <code>type</code> | optional str | <code>line</code>, <code>bar</code>, <code>circle</code>, or <code>cloud</code>; see aliases below |
+| Chart study | browser, PineTS | everything the chart draws |
+| Save/validate | server, Pine compiler | accepts or refuses the source before it is stored |
+| Alerts and API consumers | server, transpiled to Python | signal evaluation for notifications and non-browser callers |
 
-Public plot types:
+The browser runtime reads bar data through Pine's built-in series: <code>open</code>, <code>high</code>, <code>low</code>, <code>close</code>, <code>volume</code>, <code>hl2</code>, <code>hlc3</code>, <code>ohlc4</code>, <code>time</code>, and <code>bar_index</code>. There is no <code>df</code> and no <code>params</code> dictionary: a series is a value indexed by bar, and a setting is the variable an <code>input.*</code> call returns.
 
-| Input | Normalized result | Typical Pine equivalent |
-| --- | --- | --- |
-| <code>line</code> | connected line | <code>plot(..., style=plot.style_line)</code> |
-| <code>bar</code>, <code>histogram</code>, <code>column</code> | columns from a baseline | histogram/columns |
-| <code>circle</code>, <code>dot</code>, <code>point</code>, <code>scatter</code> | circles | circles/scatter |
-| <code>lamp</code> | lamp dots; three or more lamp series in one pane are arranged into rows | an approximation for state panels |
-| <code>cloud</code>, <code>band</code>, <code>fill_between</code>, <code>fill-between</code> | filled range between an upper and lower series | <code>fill(plot1, plot2)</code> |
+Available namespaces: <code>ta</code>, <code>math</code>, <code>str</code>, <code>color</code>, <code>array</code>, <code>matrix</code>, <code>map</code>, <code>request</code>, <code>input</code>, <code>strategy</code>, <code>syminfo</code>, <code>timeframe</code>, and <code>chart</code>. One imported library is vendored, <code>TradingView/ta</code>, at any version; its <code>requestVolumeDelta</code> splits a bar into buy and sell volume. Do not import a library that is not vendored with the runtime: an unresolved import fails the whole script.
 
-Style fields apply by figure type:
+Two execution environments read the same source, so two rules follow from that:
 
-- Common: <code>color</code>, <code>opacity</code>.
-- Line: <code>lineWidth</code> and <code>lineStyle</code>/<code>style</code>, such as <code>solid</code> or <code>dashed</code>.
-- Bar and circle: <code>size</code>/<code>radius</code>, <code>borderColor</code>, and <code>borderSize</code>; bars also accept <code>baseValue</code>.
-- Cloud: each point uses <code>upper</code> and <code>lower</code>; <code>color</code> may change per point. Use <code>opacity</code> between <code>0.02</code> and <code>0.30</code>. Set <code>title=False</code> to hide the cloud from the legend.
-- All <code>overlay=False</code> plots from one indicator share one pane. They do not automatically create several panes as separate Pine scripts would.
+- The chart is a browser replay over the bars the chart already holds. There is no order, account, or portfolio state to read.
+- The server-side path used by alerts transpiles the Pine source to Python first, then evaluates it. That is why an alert evaluates the conditions the chart draws. The two paths are not byte-identical, though: the server replay collapses bar state, so a condition that depends on a live bar must be gated on <code>barstate.isconfirmed</code> for the alert to match what the chart shows.
 
-For Pine-like series colors or dynamic point sizes, a <code>data</code> entry may be an object instead of a scalar:
-
-~~~python
-dynamic_points = [
-    None,
-    {"value": 102.5, "color": "#22C55E", "size": 4},
-    {"value": 101.8, "color": "#EF4444", "size": 6},
-]
-~~~
-
-Value aliases are <code>value</code>, <code>y</code>, and <code>data</code>; color aliases are <code>color</code>, <code>fillColor</code>, and <code>backgroundColor</code>; size aliases are <code>size</code>, <code>radius</code>, and <code>r</code>. New code should use the canonical <code>value/color/size</code> fields.
-
-### Filled clouds and bands
-
-A cloud point is an object with <code>upper</code> and <code>lower</code>. The list must still have <code>len(df)</code> entries. Use <code>None</code> where the band should stop; this prevents a neutral or warm-up region from being connected across a gap. The renderer orders the two values automatically, so the cloud remains valid when two lines cross.
-
-~~~python
-# @param cloud_opacity float 0.10 Cloud opacity range=0.03:0.24:0.01
-
-cloud_opacity = min(0.24, max(0.03, float(params.get("cloud_opacity", 0.10))))
-trend_cloud = []
-
-for index in range(len(df)):
-    fast_value = ema_fast.iloc[index]
-    slow_value = ema_slow.iloc[index]
-
-    if pd.isna(fast_value) or pd.isna(slow_value) or not bool(trending.iloc[index]):
-        trend_cloud.append(None)
-        continue
-
-    trend_cloud.append(
-        {
-            "upper": float(max(fast_value, slow_value)),
-            "lower": float(min(fast_value, slow_value)),
-            "color": "#22C55E" if fast_value >= slow_value else "#F43F5E",
-        }
-    )
-
-plots = [
-    {
-        "name": "Trend cloud",
-        "title": False,
-        "data": trend_cloud,
-        "color": "#22C55E",
-        "type": "cloud",
-        "overlay": True,
-        "opacity": cloud_opacity,
-    },
-]
-~~~
-
-The canonical fields are <code>upper/lower/color</code>. Compatibility aliases for the upper value are <code>top</code>, <code>high</code>, <code>value</code>, <code>y</code>, and <code>data</code>; aliases for the lower value are <code>bottom</code> and <code>low</code>. Prefer the canonical fields in new indicators.
-
-~~~python
-plots = [
-    {
-        "name": "EMA Fast",
-        "data": fast_values,
-        "color": "#22C55E",
-        "type": "line",
-        "overlay": True,
-    },
-    {
-        "name": "RSI",
-        "data": rsi_values,
-        "color": "#8B5CF6",
-        "type": "line",
-        "overlay": False,
-    },
-]
-~~~
-
-Moving averages, Bollinger bands, and price channels normally overlay the main chart. RSI, MACD, and lamp rows normally use separate panes.
-
-Use one missing-value conversion helper:
-
-~~~python
-def to_plot_list(series):
-    return [
-        None if pd.isna(value) else float(value)
-        for value in series
-    ]
-~~~
-
-Do not fill warm-up gaps in price overlays with zero. It draws misleading lines from zero to the actual market price.
+History, <code>var</code>, and <code>na</code> follow Pine semantics. A series read from the future does not exist; <code>close[1]</code> is the previous bar, and reading past the first available bar yields <code>na</code>.
 
 ---
 
-## 8. signals: sparse visual events
+## 4. Script structure and metadata
 
-~~~python
-signals = [
-    {
-        "type": "buy",
-        "text": "Long Entry",
-        "color": "#22C55E",
-        "data": entry_marks,
-    },
-    {
-        "type": "sell",
-        "text": "Long Exit",
-        "color": "#EF4444",
-        "data": exit_marks,
-    },
-]
+A complete study has one shape:
+
+~~~pine
+//@version=6
+// Dual EMA Viewer — chart-only study, no order logic.
+
+indicator("Dual EMA Viewer", overlay=true)
+
+// 1. Settings
+// 2. Calculation
+// 3. Drawing
+// 4. Alerts
 ~~~
+
+Rules that the compiler and the save path enforce:
+
+- <code>//@version=6</code> is the first line.
+- Exactly one <code>indicator(...)</code> or <code>strategy(...)</code> declaration, on one line, at the start of a line near the top.
+- The declaration's first string argument is the study title. That title is the name the library listing shows; there is no separate name block.
+- Every knob the user may tune is declared with <code>input.*</code>, not left as a literal.
+
+There is no separate metadata block. The retired Python contract used a bare assignment (<code>my_indicator_name = "..."</code>) for the same job; a migrated script replaces it with the declaration title, which is also what the save path reads first.
+
+Project source rules require English identifiers, comments, input titles, and default display labels. Localize display text only when a user explicitly requests a target language.
+
+---
+
+## 5. Settings: declaring input.* fields
+
+The IDE builds the parameter panel by scanning the script's <code>input.*</code> declarations. There is nothing to declare separately and nothing to register: an input that exists in the source becomes a form field, and its title, group, tooltip, and bounds come from the arguments you wrote.
+
+~~~pine
+//@version=6
+indicator("EMA Channel", overlay=true)
+
+fastLen = input.int(12, "Fast EMA length", minval=1, maxval=200, step=1, group="Parameters", tooltip="Bars used by the fast EMA. Lower values react sooner and whipsaw more.")
+slowLen = input.int(26, "Slow EMA length", minval=2, maxval=400, step=2, group="Parameters", tooltip="Bars used by the slow EMA. Must stay above the fast length.")
+bandPct = input.float(1.5, "Channel width (%)", minval=0.1, maxval=10.0, step=0.1, group="Parameters", tooltip="Distance of the channel from the fast EMA, in percent.")
+showMarks = input.bool(true, "Show crossover markers", group="Visuals")
+lineColor = input.color(#3B82F6, "Line color", group="Visuals")
+src = input.source(close, "Price source", group="Visuals")
+htf = input.timeframe("1D", "Higher timeframe", group="Visuals")
+~~~
+
+What each argument becomes in the panel:
+
+| Argument | Panel effect |
+| --- | --- |
+| the second argument, <code>title</code> | the field label, and the key the saved parameter value is stored under |
+| <code>group</code> | the section the field is placed in |
+| <code>tooltip</code> | the help text shown beside the field |
+| <code>minval</code> / <code>maxval</code> | the accepted minimum and maximum of a numeric field |
+| <code>options=[...]</code> | a dropdown instead of a free-text field |
+| the first argument, <code>defval</code> | the value the panel starts at |
+
+Input constructors that become form fields: <code>input.int</code>, <code>input.float</code>, <code>input.bool</code>, <code>input.string</code>, <code>input.color</code>, <code>input.source</code>, <code>input.timeframe</code>, <code>input.symbol</code>, <code>input.session</code>, <code>input.price</code>, <code>input.time</code>, <code>input.text_area</code>, and <code>input.enum</code>.
 
 Rules:
 
-- <code>type</code> is commonly <code>buy</code> or <code>sell</code>. It controls marker orientation, not the signal name.
-- <code>text</code> is the stable name. Optional <code>textData</code> can provide a per-bar label.
-- The most stable format for both rendering and notification monitoring is a finite, non-zero marker price in <code>data[i]</code>.
-- <code>text</code> and <code>textData</code> never activate a signal by themselves.
-- Empty positions must contain real <code>None</code> values.
-- Mark one-bar events by default instead of repeating a persistent state.
+- Use the input declaration's title as the label. A field with no title is not shown.
+- A default must be a literal or a constant assigned a literal. The panel reads it out of the source before the script runs, so a computed default (<code>input.int(timeframe.period)</code>) has no value to display and the field reports none.
+- Do not invent a second name for a setting in the code. The variable the declaration is assigned to is the value the script uses: <code>fastLen</code> above is the length, not a lookup key.
+- A length or index argument must be an <code>int</code>: <code>ta.ema(close, 12)</code> is fine, <code>ta.ema(close, 12.5)</code> is refused by the compiler.
+- Parameters control calculations and display only. Do not declare account, position, leverage, stop-loss, or take-profit settings in an indicator; those belong to the strategy.
 
-Compatibility formats also accept <code>True</code>, or <code>{"active": True, "price": ..., "text": ..., "color": ...}</code>. When a boolean has no price, the renderer anchors it around the current candle's high or low. For consistent preview, saved signal monitoring, and future clients, new indicators should prefer the “price or <code>None</code>” form and use point objects only when per-point text or color is required.
+Dropdown and constrained-value example:
 
-<code>renderMode</code> controls how persistent conditions become markers:
+~~~pine
+mode = input.string("Trend", "Mode", options=["Trend", "Range", "Off"], group="Parameters", tooltip="Which branch of the study to draw.")
+~~~
 
-| Value | Behavior |
+---
+
+## 6. Plots, candles, fills, and colors
+
+<code>plot()</code> draws a series on the chart. Its arguments are the value and, optionally, the legend title and style:
+
+~~~pine
+//@version=6
+indicator("EMA Overlay", overlay=true)
+
+emaFast = ta.ema(close, 12)
+emaSlow = ta.ema(close, 26)
+
+plot(emaFast, "EMA Fast", color=#22C55E, linewidth=2)
+plot(emaSlow, "EMA Slow", color=#3B82F6, linewidth=2)
+~~~
+
+- <code>title</code> is what the legend shows. Give a title to anything the reader is meant to identify; leave helper series untitled or hide them with <code>display=display.none</code>.
+- <code>style</code> selects the form: <code>plot.style_line</code>, <code>plot.style_linebr</code> (a gap where the value is <code>na</code>), <code>plot.style_stepline</code>, <code>plot.style_columns</code>, <code>plot.style_histogram</code>, <code>plot.style_circles</code>, <code>plot.style_cross</code>, <code>plot.style_area</code>, or <code>plot.style_areabr</code>.
+- <code>color</code> takes a hex literal or <code>color.*</code>. A per-bar color is a series expression: <code>color = close >= open ? #22C55E : #EF4444</code>.
+- A gap is <code>na</code>. Write <code>plot(condition ? value : na)</code>; never plot a sentinel such as <code>0</code> for a missing point, because the line then connects through zero and misrepresents the price.
+- <code>offset</code> shifts the drawing by whole bars. Use it when the drawing is deliberately displaced; do not fold the shift into the value.
+
+Candles and bars have their own call:
+
+~~~pine
+plotcandle(open, high, low, close, "Custom candles", color=close >= open ? #22C55E : #EF4444, wickcolor=#9CA3AF, bordercolor=#374151)
+~~~
+
+<code>plotbar()</code> draws OHLC bars from the same four values.
+
+Levels and shaded regions:
+
+~~~pine
+hline(70, "Overbought", color=color.new(#EF4444, 60))
+hline(30, "Oversold", color=color.new(#22C55E, 60))
+
+upper = plot(emaFast * 1.005, "Channel upper", color=#22C55E, display=display.none)
+lower = plot(emaFast * 0.995, "Channel lower", color=#22C55E, display=display.none)
+fill(upper, lower, color=color.new(#22C55E, 85), title="Channel")
+~~~
+
+- <code>hline()</code> takes a constant price. It is a level, not a series.
+- <code>fill()</code> takes the two <code>plot()</code> handles it should shade. Never hardcode a value where a handle belongs.
+- <code>color.new(color, transparency)</code> builds a translucent color; 0 is opaque and 100 is invisible. Prefer a transparency above 60 for a band behind price.
+- <code>bgcolor()</code> and <code>barcolor()</code> color the whole background or the candles, one color per bar. Use <code>na</code> to leave a bar untouched.
+
+~~~pine
+bgcolor(emaFast > emaSlow ? color.new(#22C55E, 92) : color.new(#EF4444, 92), title="Regime")
+barcolor(close >= open ? #22C55E : #EF4444, title="Candle direction")
+~~~
+
+### Filled bands and clouds
+
+A cloud is two <code>plot()</code> handles and one <code>fill()</code>. Ordering happens at draw time, so the band stays valid when the two lines cross:
+
+~~~pine
+//@version=6
+indicator("Trend envelope", overlay=true)
+
+fastLen = input.int(12, "Fast EMA length", minval=1, maxval=200, group="Parameters")
+slowLen = input.int(26, "Slow EMA length", minval=2, maxval=400, group="Parameters")
+cloudOpacity = input.int(85, "Cloud transparency", minval=60, maxval=98, group="Visuals")
+
+emaFast = ta.ema(close, fastLen)
+emaSlow = ta.ema(close, slowLen)
+
+upper = plot(math.max(emaFast, emaSlow), "Upper edge", color=#22C55E)
+lower = plot(math.min(emaFast, emaSlow), "Lower edge", color=#F43F5E)
+fill(upper, lower, color=emaFast >= emaSlow ? color.new(#22C55E, cloudOpacity) : color.new(#F43F5E, cloudOpacity), title="Trend cloud")
+~~~
+
+Moving averages, Bollinger bands, and price channels normally overlay the price chart (<code>overlay=true</code>). RSI, MACD, and other oscillators normally use a separate pane (<code>overlay=false</code>); all plots from one study share that pane, so they do not split into several panes the way separate TradingView scripts would.
+
+---
+
+## 7. Markers: one-bar events
+
+A marker belongs on the bar where something changed, not on every bar where a condition happens to be true. Pine gives the change event directly:
+
+~~~pine
+//@version=6
+indicator("EMA Cross Markers", overlay=true)
+
+fastLen = input.int(12, "Fast EMA length", minval=1, maxval=200, group="Parameters")
+slowLen = input.int(26, "Slow EMA length", minval=2, maxval=400, group="Parameters")
+showMarks = input.bool(true, "Show crossover markers", group="Visuals")
+
+emaFast = ta.ema(close, fastLen)
+emaSlow = ta.ema(close, slowLen)
+
+crossUp = ta.crossover(emaFast, emaSlow)
+crossDown = ta.crossunder(emaFast, emaSlow)
+
+plotshape(showMarks and crossUp, "Golden cross", shape.triangleup, location.belowbar, #22C55E, size=size.small)
+plotshape(showMarks and crossDown, "Death cross", shape.triangledown, location.abovebar, #EF4444, size=size.small)
+~~~
+
+Why the distinction matters:
+
+- <code>ta.crossover(a, b)</code> is true on the single bar where <code>a</code> moved above <code>b</code>; <code>ta.crossunder</code> is the mirror. That is the event an author means by “a cross”.
+- A continuous boolean such as <code>emaFast &gt; emaSlow</code> is true on every bar of the trend. Used as a marker condition it paints a shape on every one of those bars, and an <code>alertcondition</code> built on it fires on every bar for as long as the trend lasts. That is the most common authoring mistake in published indicators.
+- A boolean with no condition, such as <code>plotshape(true, ...)</code>, marks every bar and is almost never what was meant.
+
+Marker calls:
+
+| Call | Use |
 | --- | --- |
-| <code>events</code> (explicit event mode) | every non-empty event point is rendered and can notify |
-| <code>points</code> / <code>markers</code> / <code>raw</code> | explicitly preserve every active point |
-| <code>state</code> / <code>continuous</code> / <code>condition</code> | render and notify only on the False → True edge |
+| <code>plotshape(cond, title, shape.triangleup, location.belowbar, color)</code> | a built-in shape at a fixed side of the bar |
+| <code>plotchar(cond, title, "▲", location.belowbar, color)</code> | a single character instead of a shape |
+| <code>plotarrow(up, "Delta")</code> | an up/down arrow sized by magnitude |
 
-When the mode is omitted, the runtime identifies high-density active series as persistent state and applies edge behavior. Public indicators should not depend on that heuristic; generate sparse events directly or set <code>renderMode</code> explicitly.
+Marker arguments worth setting: <code>title</code> (the name the marker and its alert are listed under), <code>location.belowbar</code> / <code>location.abovebar</code>, <code>size</code>, <code>text</code> for a short label on the shape, and <code>color</code> per bar.
 
-Convert a state into its rising edge:
-
-~~~python
-def edge(condition):
-    current = condition.fillna(False).astype(bool)
-    previous = current.shift(1, fill_value=False).astype(bool)
-    return current & ~previous
-~~~
-
-Build marker-price lists:
-
-~~~python
-entry_event = edge(ema_fast > ema_slow)
-exit_event = edge(ema_fast < ema_slow)
-
-entry_marks = [
-    float(df["low"].iloc[i] * 0.995)
-    if bool(entry_event.iloc[i])
-    else None
-    for i in range(len(df))
-]
-
-exit_marks = [
-    float(df["high"].iloc[i] * 1.005)
-    if bool(exit_event.iloc[i])
-    else None
-    for i in range(len(df))
-]
-~~~
-
-For “show on the next bar after confirmation”:
-
-~~~python
-confirmed_entry = edge(raw_entry).shift(
-    1,
-    fill_value=False,
-).astype(bool)
-~~~
-
-This moves a completed event later; it does not read future data.
+Markers remain drawings. A green triangle is not a long position; it is the bar where a long entry condition was true.
 
 ---
 
-## 9. layers: zones, lines, and labels
+## 8. Alerts and other timeframes
 
-Prefer plots and signals for normal indicators. Add layers only for supply/demand zones, support/resistance, channels, invalidation levels, or structure labels that materially improve readability.
+<code>alertcondition()</code> declares a condition the user can attach an alert to. It places no order and sends nothing by itself:
 
-Zone:
-
-~~~python
-{
-    "type": "zone",
-    "startIndex": 120,
-    "endIndex": 180,
-    "top": 105.2,
-    "bottom": 101.8,
-    "text": "Demand",
-    "fillColor": "#22C55E",
-    "borderColor": "#22C55E",
-    "opacity": 0.12,
-}
+~~~pine
+alertcondition(ta.crossover(emaFast, emaSlow), "Golden cross", "EMA fast crossed above slow")
+alertcondition(ta.crossunder(emaFast, emaSlow), "Death cross", "EMA fast crossed below slow")
 ~~~
 
-Horizontal line:
+- The first argument is the condition, the second is the alert's title in the UI, the third is the message text.
+- Declare alerts on event conditions. A state condition notifies on every bar of the state.
+- The chart draws the marker and the alert panel lists the condition. Configuration (channel, delivery) is the user's choice after saving; the script cannot send a notification itself.
+- Signal alerts are evaluated server-side: the stored Pine source is transpiled to Python and replayed over the bars for the alert's symbol and timeframe. A marker on the last completed bar is delivered on the following bar, so an alert does not drift onto a still-forming candle.
 
-~~~python
-{
-    "type": "line",
-    "startIndex": 100,
-    "endIndex": len(df) - 1,
-    "price": 98.5,
-    "text": "Support",
-    "color": "#F59E0B",
-    "dashed": True,
-}
+Other symbols and timeframes come from <code>request.security()</code>. It is the only way to read data the chart is not already showing:
+
+~~~pine
+htfClose = request.security(syminfo.tickerid, "1D", close[1], lookahead=barmerge.lookahead_off)
 ~~~
 
-For a sloped line, replace <code>price</code> with <code>startPrice</code> and <code>endPrice</code>. Label:
+- The second argument is the timeframe, the third the expression to evaluate there.
+- Reading <code>close[1]</code> on the higher timeframe reads the last value that is already closed. Reading <code>close</code> there reads a bar that is still moving, so the value changes until that higher-timeframe bar closes.
+- <code>lookahead=barmerge.lookahead_off</code> is the honest default; <code>lookahead_on</code> shows a value before it exists and is the usual cause of a backtest that cannot be reproduced live.
+- A higher-timeframe read does not switch the chart's timeframe. The study still runs on the chart's bars.
 
-~~~python
-{
-    "type": "label",
-    "index": len(df) - 1,
-    "price": float(df["close"].iloc[-1]),
-    "text": "Trend Weakens",
-    "color": "#EF4444",
-    "textColor": "#FFFFFF",
-}
+### Waiting for a closed bar
+
+Repainting is the author's responsibility, and the tool for it is <code>barstate.isconfirmed</code>:
+
+~~~pine
+confirmedUp = ta.crossover(emaFast, emaSlow) and barstate.isconfirmed
+
+plotshape(confirmedUp, "Confirmed cross", shape.triangleup, location.belowbar, #22C55E)
+alertcondition(confirmedUp, "Confirmed cross", "EMA fast crossed above slow on a closed bar")
 ~~~
 
-Indices are the most stable representation for the current <code>df</code>. Matching <code>startTime</code>, <code>endTime</code>, and <code>time</code> values are also supported.
-
-Layers remain visual objects. They do not represent real orders, positions, or hosted stops.
+While the rightmost bar is still forming, <code>barstate.isconfirmed</code> is false, so the marker and the alert condition wait for the bar to close. Any condition that reads a live value — the current close, a higher-timeframe read, a volume figure — must be gated this way if it drives an alert or a claim about the past.
 
 ---
 
-## 10. TradingView/Pine capability mapping
+## 9. Lines, labels, and boxes
 
-QuantDinger does not execute Pine source. Migration means preserving indicator meaning, numerical timing, and visual expression with Python/pandas. This table is the current contract boundary:
+Most studies need only plots and markers. Reach for Pine's drawing objects when the annotation is an object rather than a per-bar series: a support line, a demand zone, a one-off label on a structural event.
 
-| TradingView/Pine capability | Current status | QuantDinger equivalent or limit |
-| --- | --- | --- |
-| OHLCV, history references, rolling windows | Supported | <code>df</code>, <code>shift</code>, <code>rolling</code>, <code>ewm</code> |
-| <code>input.int/float/bool/string</code> | Core semantics supported | <code># @param</code>; Pine group, inline, confirm, and dedicated color/source/timeframe/symbol controls are not available |
-| Common <code>ta.*</code> indicators | Calculation semantics are implementable | use pandas/numpy; the indicator runtime has no Pine-compatible <code>ta</code> namespace, so smoothing, warmup, and NaN behavior must be verified |
-| <code>plot()</code>, histogram, circles | Common subset supported | line/bar/circle plots, overlay/pane placement, and per-point colors/sizes |
-| <code>fill()</code> between two plots | Supported | use a <code>cloud</code> plot with per-point <code>upper</code>/<code>lower</code> values and optional per-point color |
-| <code>plotshape()</code>, <code>plotchar()</code> | Main event semantics supported | use <code>signals</code>; use <code>textData</code> or point objects for dynamic text |
-| <code>hline()</code>, line, box, label | Common static results supported | line/zone/label layers; each run returns a final object list, without Pine object IDs, mutation methods, or garbage-collection semantics |
-| <code>alert()</code>, <code>alertcondition()</code> | Partially supported | emit <code>signals</code>, then configure monitoring after saving; indicator code does not directly notify or trade |
-| arrays, maps, user functions, state calculations | Python equivalents available | use list/dict, functions, and pandas Series; calculation is vectorized over the DataFrame, not Pine's per-bar <code>var</code>/<code>varip</code> model |
-| linefill, <code>bgcolor()</code>, <code>barcolor()</code> | No first-class equivalent yet | a fixed range may be approximated with a zone; this is not full background or candle-color compatibility |
-| area/step/cross/arrow, <code>plotcandle()</code>/<code>plotbar()</code> | Not supported yet | an unknown <code>type</code> currently falls back to line; do not rely on that fallback |
-| table, polyline, dynamic drawing lifecycle | Not supported yet | do not emit undefined objects |
-| <code>request.security()</code>, <code>request.*()</code>, cross-symbol/MTF | Not supported yet | indicators receive only the current chart DataFrame and cannot fetch network or exchange data |
-| <code>barstate.*</code>, tick updates, rollback | Different execution model | the runtime recalculates from the received DataFrame; confirmed-bar events are the reproducible baseline |
-| strategy.*, orders, positions, backtesting | Outside indicator scope | convert to Strategy API V2 |
+~~~pine
+// A label on each confirmed crossover, deleted when the next one appears.
+var label lastMark = na
 
-The recommended acceptance criterion for “most features are consistent” is therefore: common single-symbol, single-timeframe indicators produce equivalent values and event bars from the same OHLCV, parameters, and confirmed candles. It does not mean Pine source runs directly, and it excludes multi-timeframe requests, tick state, and advanced drawing objects until those contracts are implemented.
+if confirmedUp
+    if not na(lastMark)
+        label.delete(lastMark)
+    lastMark := label.new(bar_index, low, "Long", style=label.style_label_up, color=#22C55E, textcolor=#FFFFFF)
+~~~
 
-For every Pine migration:
+~~~pine
+// A horizontal level held for the last 100 bars.
+var line support = na
 
-1. Record the Pine version, inputs, source series, and indicator timeframe.
-2. Match exact SMA/EMA/RMA/WMA, standard-deviation, ATR, and crossover definitions; matching names are not enough.
-3. Match warmup, <code>na</code> propagation, division-by-zero handling, and the first valid bar.
-4. Separate persistent conditions from one-time events; a Pine condition series must not become a notification on every bar.
-5. Compare numerical tolerance, event bar indexes, and drawing anchors on a fixed OHLCV fixture.
-6. If the Pine script uses a “not supported yet” row, simplify it, document an approximation, or extend the platform contract first. Never label it fully compatible in documentation or code comments.
+if bar_index == last_bar_index - 100
+    support := line.new(bar_index, low, last_bar_index, low, color=#F59E0B, width=1, style=line.style_dashed)
+~~~
 
-See TradingView's official Pine documentation for its capability categories: [Visuals overview](https://www.tradingview.com/pine-script-docs/visuals/overview/), [Inputs](https://www.tradingview.com/pine-script-docs/concepts/inputs/), [Other timeframes and data](https://www.tradingview.com/pine-script-docs/concepts/other-timeframes-and-data/), and [Bar states](https://www.tradingview.com/pine-script-docs/concepts/bar-states/).
+- <code>var</code> keeps one handle across bars instead of creating a new object on every bar. Without it the study makes a new drawing each bar until the object limit is reached and the oldest is dropped.
+- Delete what is superseded: <code>label.delete()</code>, <code>line.delete()</code>, <code>box.delete()</code>. A stale marker left on the chart reads as a live level.
+- The number of objects a script may keep is capped by the declaration: <code>indicator(..., max_labels_count=500, max_lines_count=500, max_boxes_count=500)</code>.
+- <code>box.new()</code> draws a zone: top, bottom, left and right edges. <code>bgcolor()</code> is not a substitute for a zone that starts and ends on specific bars.
+- Arrays of handles are the way to manage a set: <code>array.new_line()</code> plus <code>array.push()</code> and <code>line.delete()</code> when the set has to be pruned.
+
+Drawing objects are still drawings. A box labelled “Support” is not an order, a stop, or a position.
 
 ---
 
-## 11. pandas and numpy type traps
+## 10. Migrating a Python indicator to Pine
 
-The most common failure is treating a numpy ndarray as a pandas Series.
+The Python indicator contract is retired. A stored indicator is Pine source; a row that still holds Python is refused at save time, because the source no longer compiles. The rewrite is mechanical, and this table is the whole of it:
 
-Incorrect:
-
-~~~python
-values = np.where(close > close.shift(1), close, 0)
-average = values.rolling(10).mean()
-~~~
-
-<code>np.where</code> may return ndarray, which has no <code>rolling</code>, <code>shift</code>, <code>ewm</code>, <code>fillna</code>, or <code>iloc</code>.
-
-Prefer pandas-native operations:
-
-~~~python
-values = close.where(close > close.shift(1), 0)
-average = values.rolling(10).mean()
-~~~
-
-When wrapping an ndarray is unavoidable:
-
-~~~python
-array = np.where(close > close.shift(1), close, 0)
-values = pd.Series(array, index=df.index)
-~~~
-
-Always pass <code>index=df.index</code>. Otherwise the new RangeIndex can silently misalign with a DatetimeIndex.
-
-| numpy form | Preferred pandas form |
+| Python indicator (retired) | Pine study (current) |
 | --- | --- |
-| <code>np.where(cond, a, b)</code> | <code>a.where(cond, b)</code> |
-| <code>np.maximum(s, 0)</code> | <code>s.clip(lower=0)</code> |
-| <code>np.minimum(s, k)</code> | <code>s.clip(upper=k)</code> |
-| <code>np.abs(s)</code> | <code>s.abs()</code> |
+| <code>my_indicator_name = "..."</code> | the title in <code>indicator("...")</code> |
+| <code>my_indicator_description = "..."</code> | still read as the row's description if present; Pine has no description syntax, so otherwise it comes from the save payload |
+| <code># @param fast_len int 12 Fast EMA period</code> | <code>fastLen = input.int(12, "Fast EMA period", minval=1)</code> |
+| <code>params.get("fast_len", 12)</code> | the variable <code>fastLen</code> the declaration produced |
+| the <code>df</code> working copy | the built-in series <code>open/high/low/close/volume</code> |
+| pandas or numpy arithmetic | <code>ta.*</code>, <code>math.*</code>, and plain series arithmetic |
+| the <code>output</code> dictionary | <code>plot()</code>, <code>plotshape()</code>, and the drawing calls |
+| a cloud entry with <code>upper</code>/<code>lower</code> | two <code>plot()</code> handles plus <code>fill()</code> |
+| a marker list with <code>None</code> gaps | <code>plotshape(condition, ...)</code> on a one-bar event |
+| a zone, line, or label layer object | <code>box.new()</code>, <code>line.new()</code>, <code>label.new()</code> |
+| <code>None</code> for a missing value | <code>na</code> |
+
+Steps:
+
+1. Retype the logic as Pine. There is no DataFrame to slice and no vectorised rewrite: <code>ta.ema(close, len)</code> replaces the hand-rolled <code>ewm</code> chain, and <code>close[1]</code> replaces a <code>shift</code>.
+2. Delete the <code># @param</code> block and write <code>input.*</code> declarations with the same defaults, plus the range the old code assumed (<code>minval</code>, <code>maxval</code>, <code>step</code>).
+3. Delete the <code>output</code> dictionary and call the drawing function that matches each entry: a plot entry becomes <code>plot()</code>, a marker entry becomes <code>plotshape()</code>, a cloud entry becomes two plots and a <code>fill()</code>.
+4. Keep the calculations, not the plumbing. Sentinel values, index gymnastics, and the <code>df</code> copy step all disappear.
+5. Save. The parameter panel is derived from the code, so there is nothing to keep in sync afterwards: editing an <code>input.*</code> line is editing the form.
+
+The panel derives itself from the source, which also means a value the user should be able to change must not be a literal buried in the body — promote it to an input while migrating, or it cannot be tuned later.
+
+---
+
+## 11. Pine type and series traps
+
+Several Python habits translate badly. These are the cases that produce a chart that looks plausible and is wrong:
+
+- <code>na</code> is Pine's missing value, and it propagates. Arithmetic on <code>na</code> yields <code>na</code>, a comparison with <code>na</code> is neither true nor false, and a plot of <code>na</code> is a gap. Do not paper over it with <code>nz()</code> unless the study genuinely means zero: <code>nz(rsi)</code> turns a warm-up gap into a value of 0, which is a real RSI reading.
+- Integer division truncates. <code>1/2</code> is <code>0</code>, not <code>0.5</code>; write <code>1.0/2</code> or use a float input when a ratio is meant.
+- Lengths and indices must be integers. <code>ta.ema(close, len)</code> requires an <code>int</code>; a float length is a compile error, not a rounding.
+- A history offset reads the past only. <code>close[1]</code> is the previous bar, and a read past the first bar in the chart's data is <code>na</code>. Guard a long lookback with <code>bar_index &gt; n</code>.
+- <code>var</code> and <code>varip</code> persist state across bars. That is what makes a counter or a drawing handle work, and it is also what makes a script behave differently from a fresh evaluation: initialise with <code>na</code> or a literal and set the value on the bar it belongs to.
+- A series cannot be used where a simple value is required, such as an input default or a timeframe string. <code>timeframe.period</code> is read once and is a simple value; <code>str.tostring(close)</code> is a series.
+- Strings in a title or a message are literals. An alert message cannot be built from a series inside <code>alertcondition()</code>; the message is fixed text.
+- Division by zero yields <code>na</code> or infinity. Guard the denominator (<code>den == 0 ? na : num/den</code>) instead of letting a spike reach the plot.
 
 ---
 
 ## 12. Avoid look-ahead and repainting
 
-An indicator may use only the current and earlier bars. Do not use:
+A study may use only the current and earlier bars. The ways to break that in Pine:
 
-- <code>shift(-1)</code> or <code>shift(-N)</code>;
-- <code>iloc[i + 1]</code> inside row loops;
-- <code>bars_ago(-N)</code>;
-- <code>rolling(..., center=True)</code>;
-- the final full-dataset row to rewrite past signals;
-- future highs, lows, or confirmations to mark an earlier bar.
+- reading a still-forming higher-timeframe bar with <code>request.security()</code> and treating it as final;
+- <code>lookahead=barmerge.lookahead_on</code> on a higher-timeframe read, which shows a value before the bar that produced it existed;
+- plotting a condition that depends on the live close and then describing the marker as historical;
+- using <code>barstate.islast</code> to rewrite what earlier bars should have shown;
+- moving a marker to an earlier bar because the signal “should have” been there.
 
-A valid crossover uses the current and previous state:
+The honest crossover reads the current and previous state, and gates the event on a closed bar:
 
-~~~python
-cross_up = (
-    (ema_fast > ema_slow)
-    & (ema_fast.shift(1) <= ema_slow.shift(1))
-)
+~~~pine
+confirmedUp = ta.crossover(emaFast, emaSlow) and barstate.isconfirmed
 ~~~
 
-If a signal requires the current close to confirm, its converted strategy should execute later. Do not move the signal backward merely to improve the chart or backtest.
+This delays the event until the bar closes; it never reads a later bar. If a signal requires the close to confirm, the strategy that trades it executes later too. Do not move the signal backward to improve the chart or a backtest.
 
 ---
 
-## 13. Sandbox and safety rules
+## 13. Language limits and safety
 
-Allowed computational modules include numpy, pandas, math, json, datetime, time, collections, functools, itertools, statistics, decimal, fractions, and copy. Since <code>pd</code> and <code>np</code> are preloaded, imports are normally unnecessary.
+A Pine study cannot do anything dangerous, and the constraints that remain are about what can be expressed rather than what is permitted:
 
-Do not use:
-
-- network, file, database, or subprocess access;
-- <code>eval</code>, <code>exec</code>, <code>compile</code>, or <code>open</code>;
-- reflection, dynamic imports, dunder escapes, or sandbox bypasses;
-- pandas/numpy file read, write, or serialization methods;
-- modules such as <code>os</code>, <code>sys</code>, <code>requests</code>, <code>socket</code>, <code>subprocess</code>, <code>threading</code>, <code>sqlite3</code>, <code>pathlib</code>, <code>pickle</code>, <code>ctypes</code>, or <code>operator</code>.
-
-Validation has a timeout. Avoid unbounded loops, explosive recursion, and unnecessarily expensive row-by-row algorithms.
+- No filesystem, network, database, process, or clock access. Everything comes from the chart's bars and the script's inputs.
+- Imports resolve only against vendored sources. An unresolved import fails the whole script.
+- One <code>indicator(...)</code> or <code>strategy(...)</code> declaration per file.
+- No account, order, position, or portfolio state. <code>strategy.*</code> calls are legal but have nothing to act on in the browser.
+- The compiler is the gate. Source that does not compile is refused with HTTP 400 at save time and never reaches the chart.
+- Keep the per-bar work bounded. A script that loops over a large array on every bar is correct but slow, and the preview and alert replay both pay for it.
 
 ---
 
 ## 14. Complete tutorial: dual EMA viewer
 
-~~~python
-# @param fast_len int 12 Fast EMA period range=5:30:1
-# @param slow_len int 26 Slow EMA period range=10:80:2
-# @param confirm_next_bar bool false Show markers one bar after confirmation
-# @param show_marks bool true Show crossover markers
+~~~pine
+//@version=6
+// Dual EMA Viewer — chart-only study. Visual markers, no order logic.
 
-my_indicator_name = "Dual EMA Viewer"
-my_indicator_description = "Displays two EMAs and marks confirmed crossover events."
+indicator("Dual EMA Viewer", overlay=true)
 
-df = df.copy()
+// ===== Settings =====
+fastLen = input.int(12, "Fast EMA length", minval=5, maxval=30, step=1, group="Parameters", tooltip="Bars used by the fast EMA.")
+slowLen = input.int(26, "Slow EMA length", minval=10, maxval=80, step=2, group="Parameters", tooltip="Bars used by the slow EMA.")
+showMarks = input.bool(true, "Show crossover markers", group="Visuals")
+showLabels = input.bool(false, "Label each crossover", group="Visuals")
+fastColor = input.color(#22C55E, "Fast EMA color", group="Visuals")
+slowColor = input.color(#3B82F6, "Slow EMA color", group="Visuals")
 
-fast_len = int(params.get("fast_len", 12))
-slow_len = int(params.get("slow_len", 26))
-confirm_next_bar = bool(params.get("confirm_next_bar", False))
-show_marks = bool(params.get("show_marks", True))
+// ===== Calculation =====
+emaFast = ta.ema(close, fastLen)
+emaSlow = ta.ema(close, slowLen)
 
-close = df["close"]
-high = df["high"]
-low = df["low"]
+// A crossover is a one-bar event. A continuous condition would mark every bar
+// of the trend, and an alert on it would fire on every one of those bars.
+golden = ta.crossover(emaFast, emaSlow)
+death = ta.crossunder(emaFast, emaSlow)
 
+// Only count the event once the bar has closed, so the study does not repaint.
+confirmedGolden = golden and barstate.isconfirmed
+confirmedDeath = death and barstate.isconfirmed
 
-def edge(condition):
-    current = condition.fillna(False).astype(bool)
-    previous = current.shift(1, fill_value=False).astype(bool)
-    return current & ~previous
+// ===== Drawing =====
+plot(emaFast, "EMA Fast", color=fastColor, linewidth=2)
+plot(emaSlow, "EMA Slow", color=slowColor, linewidth=2)
 
+plotshape(showMarks and confirmedGolden, "Long Entry", shape.triangleup, location.belowbar, #22C55E, size=size.small, text="L")
+plotshape(showMarks and confirmedDeath, "Long Exit", shape.triangledown, location.abovebar, #EF4444, size=size.small, text="X")
 
-def to_plot_list(series):
-    return [
-        None if pd.isna(value) else float(value)
-        for value in series
-    ]
+var label lastLabel = na
 
+if showLabels and confirmedGolden
+    if not na(lastLabel)
+        label.delete(lastLabel)
+    lastLabel := label.new(bar_index, low, "Golden cross", style=label.style_label_up, color=#22C55E, textcolor=#FFFFFF)
 
-ema_fast = close.ewm(span=fast_len, adjust=False).mean()
-ema_slow = close.ewm(span=slow_len, adjust=False).mean()
-
-golden = edge(ema_fast > ema_slow)
-death = edge(ema_fast < ema_slow)
-
-if confirm_next_bar:
-    golden = golden.shift(1, fill_value=False).astype(bool)
-    death = death.shift(1, fill_value=False).astype(bool)
-
-golden_marks = [
-    float(low.iloc[i] * 0.995)
-    if show_marks and bool(golden.iloc[i])
-    else None
-    for i in range(len(df))
-]
-
-death_marks = [
-    float(high.iloc[i] * 1.005)
-    if show_marks and bool(death.iloc[i])
-    else None
-    for i in range(len(df))
-]
-
-output = {
-    "name": my_indicator_name,
-    "plots": [
-        {
-            "name": "EMA Fast",
-            "data": to_plot_list(ema_fast),
-            "color": "#22C55E",
-            "type": "line",
-            "overlay": True,
-        },
-        {
-            "name": "EMA Slow",
-            "data": to_plot_list(ema_slow),
-            "color": "#3B82F6",
-            "type": "line",
-            "overlay": True,
-        },
-    ],
-    "signals": [
-        {
-            "type": "buy",
-            "text": "Long Entry",
-            "color": "#22C55E",
-            "data": golden_marks,
-        },
-        {
-            "type": "sell",
-            "text": "Long Exit",
-            "color": "#EF4444",
-            "data": death_marks,
-        },
-    ],
-    "layers": [],
-}
+// ===== Alerts =====
+alertcondition(confirmedGolden, "Golden cross", "EMA fast crossed above slow on a closed bar")
+alertcondition(confirmedDeath, "Death cross", "EMA fast crossed below slow on a closed bar")
 ~~~
 
 How it works:
 
-1. Parameter declarations drive the panel and candidate ranges.
-2. <code>params.get</code> reads exactly matching defaults.
-3. EMAs are persistent state, so they belong in plots.
-4. Crossovers are one-time events, so <code>edge</code> converts them into signals.
-5. Empty marker slots contain <code>None</code>.
-6. The bearish marker is explicitly named “Long Exit,” preventing an accidental short-entry interpretation during conversion.
+1. The declaration states the study's name and that it draws over price.
+2. Every tunable value is an <code>input.*</code>, so the settings panel builds itself from the source with the ranges and help text written here.
+3. The EMAs are persistent series, so they are plots.
+4. The crossings are one-bar events, so they are markers, and both are gated on <code>barstate.isconfirmed</code>.
+5. The markers are named “Long Entry” and “Long Exit”. The bearish marker is an exit, not an automatic short entry — that decision belongs to the conversion, not to the drawing.
+6. The alert conditions are declarations. They notify; they do not trade.
+7. No order, position, or backtest appears anywhere in the script.
+
+Open the same study on another symbol and timeframe: the code does not name either, because the chart supplies them.
 
 ---
 
@@ -720,28 +494,40 @@ How it works:
 
 Use this workflow after each meaningful change:
 
-1. Save a version.
-2. Run/preview the indicator.
-3. Execute code validation.
-4. Inspect warm-up bars, extreme markets, and short datasets.
-5. Change parameters and confirm that results respond.
-6. Confirm that signals appear only on event bars.
+1. Paste or edit the source in the Indicator IDE.
+2. Save. The server compiles the source; a syntax error comes back as HTTP 400 <code>Invalid Pine Script: &lt;reason&gt;</code> with the failing line.
+3. Open the study on a chart and inspect the drawing.
+4. Change an input and confirm the drawing responds.
+5. Confirm markers appear only on event bars, not on every bar of a trend.
+6. Attach an alert condition and confirm it fires on the bar you expect.
 
-| Hint or error | Cause | Fix |
+The IDE also reports non-blocking quality hints while you edit. They describe structure, not values:
+
+| Hint | Severity | Meaning | How to clear it |
+| --- | --- | --- | --- |
+| <code>EMPTY_CODE</code> | error | the source is empty | provide a complete script |
+| <code>MISSING_PINE_VERSION</code> | warn | no <code>//@version=</code> line | make <code>//@version=6</code> the first line |
+| <code>UNSUPPORTED_PINE_VERSION</code> | error | the declared version is below 5 | rewrite the source for version 5 or later |
+| <code>UNKNOWN_PINE_VERSION</code> | warn | the declared version is above 6 | target 6, which is what the runtime implements |
+| <code>PINE_SYNTAX_ERROR</code> | error | the parser rejected the source | fix the reported line; the message carries the position |
+| <code>MISSING_SCRIPT_DECLARATION</code> | warn | no <code>indicator(...)</code> or <code>strategy(...)</code> call | add exactly one declaration on its own line |
+| <code>MISSING_SCRIPT_TITLE</code> | info | the declaration has no title | pass the study name as the first argument |
+| <code>SCRIPT_IS_A_STRATEGY</code> | info | the source declares <code>strategy(...)</code> | expected for a strategy; for a chart study declare <code>indicator(...)</code> |
+| <code>NO_PLOTS_DECLARED</code> | warn | the script draws nothing | add a <code>plot</code>, <code>plotshape</code>, <code>fill</code>, <code>hline</code>, <code>bgcolor</code>, or <code>barcolor</code> call |
+
+Hints with severity <code>warn</code> and <code>info</code> do not block a save. An <code>error</code> does: the source is not stored and the response carries the reason.
+
+Common failures that are not hints:
+
+| Symptom | Cause | Fix |
 | --- | --- | --- |
-| <code>EMPTY_CODE</code> | no source | provide complete indicator code |
-| <code>MISSING_OUTPUT</code> | no output assignment | add the output dict |
-| <code>MissingOutput</code> | no output after execution | check branches and scope |
-| <code>InvalidOutputType</code> | output is not a dict | return a dict |
-| <code>InvalidOutputStructure</code> | neither plots nor signals exists | provide at least one key |
-| <code>LengthMismatch</code> | data length differs from bars | make every data list <code>len(df)</code> |
-| <code>MISSING_DF_COPY</code> | missing working copy | add <code>df = df.copy()</code> |
-| <code>PARAM_DEFAULT_MISMATCH</code> | declaration and fallback differ | align both defaults |
-| <code>DECLARED_PARAMS_NOT_READ_VIA_PARAMS_GET</code> | declared but not read | call <code>params.get</code> |
-| <code>EXECUTION_COLUMNS_IGNORED_FOR_INDICATOR</code> | trade columns detected | remove them and convert to V2 |
-| <code>STRATEGY_ANNOTATIONS_IGNORED_FOR_INDICATOR</code> | legacy strategy annotations | remove them |
-| <code>NDARRAY_PANDAS_METHOD_MISUSE</code> | ndarray used as Series | use pandas or wrap with its index |
-| <code>FUTURE_DATA_LEAK</code> | future access detected | use current and past data only |
+| a marker on every bar | the condition is a state, not an event | use <code>ta.crossover</code> / <code>ta.crossunder</code> |
+| an alert every bar | the same state condition | build the alert on the one-bar event |
+| “could not find declaration” | the version line is not first, or the declaration is indented or split | first line, column zero, one line |
+| a field missing from the panel | the input has no title | give the input a title |
+| a field shows no default | the default is an expression, not a literal | use a literal default |
+| the line connects through zero | a gap was plotted as <code>0</code> | plot <code>na</code> for the gap |
+| a value changes on the last bar | the script reads a live value | gate on <code>barstate.isconfirmed</code> |
 
 ---
 
@@ -760,7 +546,7 @@ Answer these questions before converting:
 - If it is an exchange equity, what exact catalog product, venue, currency, product type, and API family will execution use? Preserve an instrument such as <code>Crypto:00700/HKD@gate:spot</code> or a catalog-confirmed <code>Crypto:HK0700/USDT@binance:swap</code>; do not replace it with its underlying stock.
 - Is the product a long-only spot equity or a Crypto swap derivative that requires explicit direction metadata and <code>position_side</code>?
 
-The converted strategy should remove chart-only colors, label offsets, plots, layers, and marker arrays. Preserve the signal algebra, then declare instruments, frequency, sizing, and risk explicitly with Strategy API V2.
+The converted strategy drops the chart-only parts: colors, plot styles, offsets, markers, labels, and fills. Keep the signal algebra — the conditions and the bar they fire on — and declare instruments, frequency, sizing, and risk explicitly with Strategy API V2. If the original study already used <code>strategy(...)</code> and its conditions are written as strategy entries, the conversion is mostly a matter of moving that source onto the strategy side.
 
 Underlying stock data can support chart history and point-in-time fundamentals only when the active catalog supplies a valid <code>USStock</code> or <code>HKStock</code> mapping. That data mapping never changes the execution instrument, and the converter must not guess a region from a display name.
 
@@ -770,16 +556,16 @@ Always verify and backtest generated strategy code again. Marketplace publicatio
 
 ## 17. Pre-publication checklist
 
-- [ ] Name and description exist and make no return claims.
-- [ ] Comments, identifiers, metadata, and default labels are English.
-- [ ] <code>df = df.copy()</code> is present.
-- [ ] Every parameter is read through <code>params.get</code> with a matching default.
+- [ ] <code>//@version=6</code> is the first line (or <code>//@version=5</code> for a v5 target).
+- [ ] Exactly one <code>indicator(...)</code> declaration, with a title that names the study.
+- [ ] The study draws something: a plot, a marker, a fill, or a level.
+- [ ] Every tunable value is an <code>input.*</code> with a title, and numeric inputs carry sensible <code>minval</code>/<code>maxval</code>/<code>step</code>.
+- [ ] Comments, identifiers, input titles, and plot titles are English.
+- [ ] Markers are one-bar events built on <code>ta.crossover</code> / <code>ta.crossunder</code>, not on a persistent state.
+- [ ] Anything that reads a live value is gated on <code>barstate.isconfirmed</code>.
+- [ ] Higher-timeframe reads use <code>request.security()</code> without <code>lookahead_on</code>.
 - [ ] No order, position, leverage, or execution-risk logic is present.
-- [ ] <code>output</code> is a dict.
-- [ ] Every plot/signal data list has length <code>len(df)</code>.
-- [ ] Missing values are <code>None</code>; no NaN or infinity is emitted.
-- [ ] Signals are sparse events; persistent states use plots or a few layers.
-- [ ] No future data is accessed.
-- [ ] Numpy results are converted to indexed Series before pandas-only methods.
-- [ ] Short datasets, warm-up periods, and unusual parameters do not crash.
-- [ ] A version is saved and preview/validation passes.
+- [ ] Missing values are <code>na</code>; no sentinel such as <code>0</code> stands in for a gap.
+- [ ] No future data is read: no live higher-timeframe value, no rewritten past bar.
+- [ ] Short datasets, warm-up periods, and unusual parameters do not crash the preview.
+- [ ] The script saves without an <code>error</code>-severity hint, and the chart preview draws what the description claims.

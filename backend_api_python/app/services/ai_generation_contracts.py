@@ -211,73 +211,48 @@ SCRIPT_STRATEGY_REPAIR_REQUIREMENTS = """# Strategy API V2 repair requirements
 
 SCRIPT_STRATEGY_REPAIR_REQUIREMENTS += STRATEGY_INSTRUMENT_IDENTITY_CONTRACT
 
-INDICATOR_SYSTEM_CONTRACT = """# QuantDinger chart indicator contract
-
-- A chart indicator is visual analysis code only. It is not executable strategy code.
-- Indicators must not open, close, size, backtest, or live trade.
-- Do not define `initialize(context)` or `handle_data(context, data)` in indicator code.
-- Do not use any strategy context, position, schedule, leverage, or order API.
-- `output['signals']` are visual chart markers only and never place orders.
-- Input is a pandas DataFrame named `df` plus a params dict named `params`; start mutable work with `df = df.copy()`.
-- Required globals are `my_indicator_name` and `my_indicator_description`.
-- Declare tunable parameters with `# @param <name> <int|float|bool|str> <default> <description>` and read matching defaults through `params.get(...)`.
-- Set `output = {'name': ..., 'plots': [...], 'signals': [...], 'layers': [...]}`.
-- Every plot and signal data list must have exactly `len(df)` values. Use `None` for sparse values and never emit NaN or infinity.
-- Plot types are `line`, `bar`, `circle`, and `cloud`; `histogram`/`column` alias to bar, `lamp`/`dot`/`point`/`scatter` alias to circle, and `band`/`fill_between`/`fill-between` alias to cloud. Set `overlay` explicitly. All non-overlay plots from one indicator share one pane.
-- A line, bar, or circle point may be a scalar or `{'value': number, 'color': '#RRGGBB', 'size': number}` for per-bar style. Prefer the canonical `value`, `color`, and `size` keys.
-- Translate Pine `plotshape`, labels, diamonds, and other sparse price events to `signals`, not to `circle` plots. Circle plots are numeric indicator series or lamp rows; using several sparse circles for event annotations can intentionally activate the lamp-belt pane.
-- A cloud point must be `None` or `{'upper': number, 'lower': number, 'color': '#RRGGBB'}`. The cloud data list must have `len(df)` entries. Use `None` to break warm-up, neutral, or invalid regions. The renderer orders crossing boundaries automatically. Use `opacity` from `0.02` through `0.30`; use `title=False` when the cloud should not add a legend item.
-- Translate Pine `fill()` between two numeric series to one `cloud` plot. For a continuous per-bar band or trend cloud, never emit one `zone` or box layer per bar.
-- A signal is active when its `data` list contains a finite non-zero numeric marker price for that bar. This finite numeric value format is preferred for consistent preview and notification monitoring. Static `text` or `textData` labels never activate a signal on their own.
-- Signals may set `renderMode` to `events`, `points`, or `state`; prefer sparse numeric event arrays unless the requested visual is explicitly a continuous condition.
-- Signal names are dynamic: use a stable `text` label or a per-bar `textData` label. The `type` field controls marker orientation and does not restrict signal names to Buy, Sell, Long Entry, or Long Exit. Emit canonical `type='buy'` for Pine `labelup`/up markers and `type='sell'` for Pine `labeldown`/down markers; never emit `type='up'` or `type='down'`.
-- Prefer one-bar edge events for markers and notifications. Do not repeat a persistent state on every bar.
-- Layers support sparse `zone`, `line`, and `label` annotations. A canonical zone layer is `{'type': 'zone', 'startIndex': int, 'endIndex': int, 'top': number, 'bottom': number}` with optional `color`, `fillColor`, `borderColor`, `opacity`, `borderSize`, `dashed`, `text`, and `extendRight`; use `top`/`bottom`, never cloud-only `upper`/`lower`, for zone bounds. Keep each historical Pine `box.new` object as one sparse zone instead of connecting successive boxes with continuous line plots. When Pine mutates the current box, compute that box's final color, border, and dashed state. Translate Pine sloped `line.new` drawings to line layers with `startIndex`, `endIndex`, `startPrice`, `endPrice`, `dashed`, and `extendRight=True`; use bounded `extendBars` only when the source explicitly requests a fixed bar count. Do not invent Pine-only linefill, table, polyline, candle, background-color, bar-color, object-ID, or mutation contracts.
-- Stateful Pine drawings must be translated as a chronological single-pass object state machine. A `var box` or `var line` handle refers only to the most recently assigned object: freeze the previous object's endpoint and style when the handle is reassigned, and apply later `set_*` mutations only to the object currently referenced by that handle.
-- Preserve Pine drawing limits in global creation order. For `max_boxes_count`, `max_lines_count`, or a requested layer cap, merge support, resistance, bullish, bearish, and other objects by creation sequence before retaining the newest objects; never concatenate objects by semantic type and then tail-slice the grouped list.
-- When Pine combines a solid historical trend plot with a dashed `line.new(..., extend=extend.right)` projection, emit both parts: keep the confirmed history as a solid plot and add a dashed line layer whose two source points preserve the exact slope and whose `extendRight=True` projects to the visible pane edge without adding a distant autoscale point. Do not approximate the projection with a horizontal ray, a fixed arbitrary bar count, or a per-bar polyline.
-- The runtime is single-symbol and single-timeframe. Do not emulate `request.security()`, other `request.*()` APIs, network access, Pine `barstate.*`, or tick rollback.
-- Translate common Pine calculation semantics with pandas/numpy; do not claim Pine syntax/API compatibility or assume a Pine-compatible `ta.*` namespace exists.
-- Avoid look-ahead in signals and calculations: no negative shift, future `iloc`, centered rolling, or future-row reads. Pine pivot backpainting is a visual exception only when the source explicitly enables it: expose the original backpaint parameter, write already-confirmed pivot visuals to their historical display indexes, and keep breakout events on their actual confirmation/current bars. Never let backpainted display values drive alerts or strategy logic.
-- Preserve Pine plot offsets and repainting behavior explicitly. If the native plot contract has no direct offset field, construct an aligned output array of exactly `len(df)` rather than silently changing a backpainted plot into a current-bar projection. Apply a plot's offset only to that plot; do not move independent `plotshape` signals unless the source applies an offset to them too.
-- Match Pine numerical semantics, including Wilder/RMA seeding for `ta.atr`, population variance where Pine uses biased variance, warm-up bars, and `na` propagation. Do not assume pandas `ewm(..., adjust=False)` has the same initial seed as Pine RMA.
-- Use canonical renderer style fields such as `lineWidth`, not undeclared aliases such as `width`.
-- Return valid Python only, without markdown fences or prose.
+INDICATOR_SYSTEM_CONTRACT = """# QuantDinger chart indicator contract (Pine Script)
+- Write Pine Script for a chart study. The script runs in the user's browser, not on a server.
+- Start every script with `//@version=6`. Versions 5 and 6 are supported; anything older is rejected before it reaches the chart.
+- Declare the study with `indicator(...)` at column zero. Use `strategy(...)` only when the user asks for entries and exits; a strategy still draws its `plot()` output on this chart, but it cannot place orders from here.
+- Available libraries: the built-in Pine namespaces `ta`, `math`, `str`, `color`, `array`, `matrix`, `map`, `request`, `input`, `strategy`, `syminfo`, `timeframe`, `chart`. Do not `import` a library that is not vendored; an unresolved import fails the whole script.
+- Read bar data through `open`, `high`, `low`, `close`, `volume`, `hl2`, `hlc3`, `ohlc4`, `time`, `bar_index`. There is no `df` and no `params` dict.
+- Declare user-tunable settings with `input.*` and give each one a `title` and, when there are several, a `group`. The settings dialog is built from these declarations, so a period the user may want to change must not be a literal.
+- Draw with `plot`, `plotshape`, `plotchar`, `plotcandle`, `plotarrow`, `fill`, `hline`, `bgcolor`, and `barcolor`. Give each `plot` a `title` when the legend should name it; use `display=display.none` for helper series the user does not need to see.
+- `alertcondition()` is a declaration, not an order. It is safe and encouraged for conditions the user may want to be notified about.
+- `request.security()` is supported and is the only way to read another symbol or timeframe. Do not emulate it with looped lookups.
+- Avoid look-ahead: no negative offsets in calculations, no `math.sum`-style tricks that read the future. `barstate.isconfirmed` reads are fine.
+- Pine's `na` propagates through arithmetic. Do not paper over it with `nz()` unless the study genuinely means zero.
+- Keep the script honest about repainting: a value that only resolves on bar close must be gated behind `barstate.isconfirmed` if it drives an alert.
+- Return one complete Pine Script file only, without markdown fences or surrounding prose.
 """
 
 INDICATOR_GENERATION_CONTRACT = INDICATOR_SYSTEM_CONTRACT + """
 
 # Indicator generator entry
-- Generate one complete chart-only indicator suitable for immediate preview and validation.
-- Treat empty or missing existing source as a normal new-indicator state. Build the complete indicator from scratch immediately.
+- Generate one complete chart-only Pine Script suitable for immediate preview and validation.
+- Treat empty or missing existing source as a normal new-indicator state. Build the complete script from scratch immediately.
 - Never ask the user to repeat, reconfirm, or restate a sufficiently clear creation or change request. Choose conservative visual defaults for omitted cosmetic details.
 - The latest user request overrides prior assistant messages that deferred code generation or asked for another confirmation.
-- The Indicator IDE accepts QuantDinger Python only. If the user mentions Pine or Pine APIs, translate the requested behavior into this native Python contract instead of returning Pine or refusing the request.
-- Preserve useful visual semantics when existing code is supplied.
-- Include concise plots, unambiguous marker labels, and useful tunable parameters. Prefer native plots over repeated layers, keep opacity restrained, and avoid overlapping labels that obscure candles.
-- Interpret user requests written in any language, but use English for identifiers, metadata, comments, `@param` descriptions, and default plot, signal, and layer labels.
-- Localize display labels only when the user explicitly requests a target language. Keep identifiers, comments, metadata, and parameter descriptions in English.
-- `pd` and `np` are preloaded. Do not use `locals()`, `globals()`, reflection, or dynamic execution.
+- The Indicator IDE accepts Pine Script only. If the user describes something in terms of another language's APIs, translate the behaviour into Pine rather than returning that language.
+- Preserve useful visual semantics when existing code is supplied: keep the plots, levels, and alerts the user already has.
+- Include concise plots, unambiguous marker labels, and useful `input.*` settings. Prefer one clear study over a wall of debug plots.
+- Interpret user requests written in any language, but use English for identifiers, input titles, comments, and plot titles.
+- Localize display labels only when the user explicitly requests a target language. Keep identifiers, comments, and input titles in English.
+- Never emits Python. There is no `df`, no `params`, no `output` dict, and no `pd`/`np` in a Pine script.
 """
 
 INDICATOR_REPAIR_REQUIREMENTS = """# Indicator repair requirements
-- Keep the chart-only indicator contract intact.
-- Remove all strategy, backtest, scheduling, position, leverage, and order behavior.
-- Convert any old execution signals to chart-only sparse marker arrays.
-- Normalize Pine up/labelup markers to canonical `type='buy'` and down/labeldown markers to canonical `type='sell'`; do not leave `type='up'` or `type='down'` in generated output.
-- Replace sparse event-shaped `circle` plots with price-anchored `signals`; do not change renderer or plot contracts to accommodate the wrong output shape.
-- Preserve explicit Pine backpaint/offset behavior as display-only aligned arrays while keeping events on confirmation bars, and convert requested sloped `extend.right` lines to bounded dashed line layers.
-- Repair Pine ATR translations to use Wilder/RMA seeding rather than a differently seeded pandas EWM approximation.
-- Replace plot `width` with canonical `lineWidth`.
-- Repair every zone layer to use numeric `top` and `bottom` bounds; `upper` and `lower` are reserved for cloud plot points. Do not add continuous level plots that connect separate Pine box objects, and preserve each box's final mutated fill, border, and dashed state.
-- Repair stateful Pine box and line conversions as a chronological object state machine. Reassigning a Pine handle freezes the previous object, later mutations affect only the current object, and any object cap is applied after globally sorting all object types by creation sequence.
-- Ensure declared parameter defaults exactly match `params.get(...)` fallbacks.
-- Ensure metadata globals, `df = df.copy()`, and `output` exist.
-- Ensure every plot and marker array has exactly `len(df)` values.
-- Preserve valid `cloud` plots. Repair each cloud point to `None` or canonical `upper`/`lower` values with an optional per-point `color`, and keep opacity within `0.02` through `0.30`.
-- When repeated per-bar `zone` or box layers represent two continuous numeric boundaries, replace them with one `cloud` plot and use `None` for intentional gaps.
-- Treat a signal as active only when its `data` array has a finite value at that bar; never infer activation from `text` or `textData`.
-- Convert numpy arrays back to indexed pandas Series before calling pandas-only methods.
-- Use English for identifiers, metadata, comments, parameter descriptions, and default display labels unless the user explicitly requests localized display labels.
-- Return Python only, without markdown or explanations.
+- Keep the chart-only Pine study contract intact: `//@version=6` and an `indicator(...)` declaration.
+- Remove every reference to the old Python runtime: `df`, `params`, `output`, `pd.`, `np.`, `my_indicator_name`, `# @param`.
+- Convert `my_indicator_name = "..."` to the `indicator("...")` title.
+- Convert `# @param <name> <type> <default> <label>` comments to `input.<type>(...)` declarations with matching defaults and titles.
+- Convert `output['plots']` entries to `plot()` calls with the same titles.
+- Convert `output['signals']` marker arrays to `plotshape()` or `plotchar()`, anchored at the price the plot occupies.
+- Convert cloud/band plot pairs to two `plot()` calls plus `fill()` between them.
+- Convert per-bar conditional series that skip values to `plot(condition ? value : na)`; never plot a sentinel like `0` for a gap.
+- Convert offset/backpaint behaviour to an explicit `offset=` argument rather than shifting the series silently.
+- Preserve `ta.atr`, `ta.rsi`, `ta.ema`, and friends natively; do not re-derive them from scratch.
+- Declare every tunable constant as an `input.*` with the range the original code assumed (`minval`, `maxval`, `step`).
+- Return Pine only, without markdown or explanations.
 """

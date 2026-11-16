@@ -953,11 +953,17 @@ class Emitter:
             f"{indent}    order_target_percent(_SYMBOL, {target}, reason=\"{reason}\")",
         ]
 
-    def _emit_chart_plot(self, name: str, node: Any, indent: str) -> list[str]:
+    def _collect_chart_plot(self, name: str, node: Any) -> str:
         """Collect a ``plot``/``plotshape``/``plotchar`` call as a chart series.
 
-        The value is pushed into the slot for this call site and handed straight
-        back, so the surrounding statement still evaluates exactly as written.
+        Returns the Python call that records the drawing, or ``""`` when the call
+        draws nothing this converter can express.
+
+        The recording call returns the value it was given, so it can stand in for
+        the original expression anywhere it appeared. That matters because Pine
+        lets a script keep the handle (``fastLine = plot(fast)``) and hand it to
+        ``fill`` later; treating such a call as a statement-only construct
+        silently dropped the line, and with it the band drawn between two lines.
         ``plotshape``/``plotchar`` carry a condition rather than a line, so they
         become sparse markers instead of a continuous series -- that is the
         difference the chart reader sees between a band and a dot.
@@ -965,7 +971,7 @@ class Emitter:
         positional = self._positional(node)
         if not positional:
             self._warn_once(f"plot_without_value:{name}")
-            return []
+            return ""
         arguments = self._call_arguments(node)
         title = self._signal_title(node)
         if not title:
@@ -978,7 +984,7 @@ class Emitter:
         expression = self._expr(positional[0])
         if not expression:
             self._warn_once(f"plot_without_value:{name}")
-            return []
+            return ""
 
         key = f"plot_{self._counter}"
         self._counter += 1
@@ -992,7 +998,7 @@ class Emitter:
                 "color": colour,
                 "overlay": bool(self._overlay_hint()),
             })
-            return [f'{indent}_p_chart_push("{key}", {expression})']
+            return f'_p_chart_push("{key}", {expression})'
 
         # ``plotshape``/``plotchar``: the condition decides whether the marker
         # exists on this bar at all.
@@ -1003,7 +1009,12 @@ class Emitter:
             "long": self._signal_is_long(title),
             "overlay": True,
         })
-        return [f'{indent}_p_chart_mark("{key}", {expression})']
+        return f'_p_chart_mark("{key}", {expression})'
+
+    def _emit_chart_plot(self, name: str, node: Any, indent: str) -> list[str]:
+        """Emit a drawing call used as a statement."""
+        call = self._collect_chart_plot(name, node)
+        return [f"{indent}{call}"] if call else []
 
     def _plot_colour(self, node: Any) -> str:
         """Render a plot colour as a hex string the chart contract accepts."""
@@ -1943,6 +1954,12 @@ class Emitter:
                 if target:
                     self._register_helper(target)
                     return f"{target}()"
+        if self.chart_mode and not owner and name in mapping.PLOT_CALLS:
+            # ``fastLine = plot(fast)`` keeps the handle for a later ``fill``.
+            # Without this branch the call fell through to the unmapped-call
+            # fallback, which returned "" -- the line vanished and the fill had
+            # nothing to attach to.
+            return self._collect_chart_plot(name, node)
         if owner == "ta":
             return self._ta_call(name, node)
         if owner == "math":

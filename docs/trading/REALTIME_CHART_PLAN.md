@@ -3,6 +3,19 @@
 Status: agreed with the operator on 2026-11-14, implementation started.
 Owner: backend chart/data path (`backend_api_python/`) and the Vue frontend fork.
 
+> **Amended 2026-11-16.** Everything about the datafeed, the WebSocket transport
+> and the three bar defects stands. The parts about *how indicator values reach
+> the chart* do not: the plan replayed series the backend had pre-computed, and
+> the implementation now runs the Pine source itself in the browser. Read
+> "Study replay" and "Pine indicator conversion" below as the reasoning that led
+> there and was then superseded — `src/charting/indicatorPlots.js` (PineTS in
+> the page) replaced `POST /api/indicator/chart-preview` for the IDE chart, and
+> the backend transpiler now only serves alerts and API consumers. The
+> [chart indicator development guide](INDICATOR_DEV_GUIDE.md) documents the
+> current behaviour; the acceptance items below still hold, except that
+> "no polling timer" and the ten visible indicators were met by a different
+> route than the one proposed here.
+
 This document exists because the previous months of work went into the
 strategy funnel (harvest → transpile → backtest → publish) and left the two
 things the operator actually wanted unfinished:

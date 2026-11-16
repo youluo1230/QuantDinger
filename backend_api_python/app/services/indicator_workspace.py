@@ -9,7 +9,6 @@ from typing import Any, Dict, List, Optional
 from app.services.indicator_default_template import build_default_indicator_template
 from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
-from app.utils.safe_exec import validate_code_safety
 
 logger = get_logger(__name__)
 
@@ -42,62 +41,46 @@ def get_indicator_authoring_contract() -> Dict[str, Any]:
     """Machine-readable contract + starter template for external AI agents."""
     template = build_default_indicator_template()
     return {
-        "version": "indicator-contract-v2-chart-only",
+        "version": "indicator-contract-v3-pine-chart-only",
         "doc": "docs/trading/INDICATOR_DEV_GUIDE_CN.md",
         "workflow": [
             "1. Call this contract (or MCP get_indicator_authoring_contract) before writing code.",
-            "2. Write a full Python chart-only indicator script (not natural language) following required_fields.",
-            "3. POST /api/agent/v1/indicators/validate to check sandbox + output contract.",
+            "2. Write a complete Pine Script v5/v6 chart study (not natural language, not Python) following required_fields.",
+            "3. POST /api/agent/v1/indicators/validate to check that it compiles.",
             "4. POST /api/agent/v1/indicators to save into the user's indicator library (scope W).",
             "5. If the user wants backtest/live trading, use the separate Indicator-to-Strategy workflow. Do not add execution behavior to indicator code.",
         ],
         "required_fields": {
-            "globals": ["my_indicator_name", "my_indicator_description"],
-            "dataframe": "Use df = df.copy() before computations/mutations. Expected columns: open, high, low, close, volume.",
-            "output": "output = {'name', 'plots', 'signals', 'layers'}; every plot['data'] and signal['data'] length must equal len(df).",
-            "plots": "Each plot has name, data, color, overlay. Supported types are line, bar, circle, and cloud. A cloud point is None or {'upper': number, 'lower': number, 'color': '#RRGGBB'}; use opacity 0.02-0.30 and None for gaps. Prefer one cloud plot over repeated per-bar zone or box layers.",
-            "signals": "Chart markers only. Prefer one-bar edge/transition events, not continuous state markers, so notifications do not repeat every bar.",
-            "layers": "Optional sparse zones/lines/labels only when explicitly useful; default [] for normal indicators.",
-            "params": "Declare knobs with # @param name type default label and read each via params.get('name', default) with matching fallback.",
-            "calculatedVars": "Optional JSON-safe diagnostics for the UI; never required for rendering.",
+            "header": "Start with //@version=6. Version 5 also runs; anything older is refused.",
+            "declaration": "Exactly one indicator(...) or strategy(...) call, on one line, near the top. Its first string argument is the study title, which becomes the saved indicator name.",
+            "inputs": "Declare every knob with input.int/input.float/input.bool/input.string/input.color/input.source/input.timeframe and a title. The settings panel is built from these declarations.",
+            "plots": "Draw with plot, plotshape, plotchar, plotcandle, bgcolor, barcolor, hline or fill. Series must be a Pine series of bar length; na leaves a gap.",
+            "signals": "Chart markers only. Prefer one-bar events such as ta.crossover over continuous state, so notifications do not repeat every bar.",
+            "alerts": "Optional alertcondition(...) calls; they do not execute trades.",
+            "series": "Use the built-in series open/high/low/close/volume/time plus request.security for higher timeframes. There is no DataFrame and no params dict.",
         },
         "forbidden": [
+            "Python source, pandas/numpy, df or params: indicators are Pine Script only",
             "Execution/order columns: open_long, close_long, open_short, close_short, add_long, add_short, reduce_long, reduce_short",
-            "# @strategy, # signal_form, # exit_owner, # flip_mode, # timeframe, risk, leverage, trade direction, stop loss, take profit, trailing stop",
             "Strategy lifecycle or live-trading handlers",
             "Backtest or broker/account configuration inside indicator code",
-            "Natural language instead of Python source",
-            "import os/sys/requests/socket/subprocess/threading/sqlite3/multiprocessing",
-            "Chaining .rolling/.shift on np.where output without pd.Series(..., index=df.index)",
-            "Using legacy df['buy']/df['sell'] for newly generated code",
+            "Imports (import TradingView/ta/7) unless the bundled library resolver supplies them",
+            "More than one indicator()/strategy() declaration",
+            "Version below 5, or study(...) instead of indicator(...)",
+            "Natural language instead of Pine source",
         ],
         "starter_template": template,
         "minimal_indicator_snippet": (
-            "my_indicator_name = \"Agent EMA Viewer\"\n"
-            "my_indicator_description = \"Chart-only EMA crossover viewer.\"\n"
-            "# @param fast_len int 12 Fast EMA period\n"
-            "# @param slow_len int 26 Slow EMA period\n"
-            "df = df.copy()\n"
-            "fast_len = int(params.get('fast_len', 12))\n"
-            "slow_len = int(params.get('slow_len', 26))\n"
-            "fast = df['close'].ewm(span=fast_len, adjust=False).mean()\n"
-            "slow = df['close'].ewm(span=slow_len, adjust=False).mean()\n"
-            "cross_up = (fast > slow) & (fast.shift(1) <= slow.shift(1))\n"
-            "cross_dn = (fast < slow) & (fast.shift(1) >= slow.shift(1))\n"
-            "buy_marks = [float(df['low'].iloc[i] * 0.995) if bool(cross_up.iloc[i]) else None for i in range(len(df))]\n"
-            "sell_marks = [float(df['high'].iloc[i] * 1.005) if bool(cross_dn.iloc[i]) else None for i in range(len(df))]\n"
-            "output = {\n"
-            "    'name': my_indicator_name,\n"
-            "    'plots': [\n"
-            "        {'name': 'EMA Fast', 'data': fast.tolist(), 'color': '#ffb020', 'overlay': True},\n"
-            "        {'name': 'EMA Slow', 'data': slow.tolist(), 'color': '#2d8cff', 'overlay': True},\n"
-            "    ],\n"
-            "    'signals': [\n"
-            "        {'type': 'buy', 'text': 'Cross Up', 'color': '#22c55e', 'data': buy_marks},\n"
-            "        {'type': 'sell', 'text': 'Cross Down', 'color': '#ef4444', 'data': sell_marks},\n"
-            "    ],\n"
-            "    'layers': [],\n"
-            "}\n"
+            "//@version=6\n"
+            "indicator(\"Agent EMA Viewer\", overlay = true)\n"
+            "fastLen = input.int(12, \"Fast EMA period\", minval = 1)\n"
+            "slowLen = input.int(26, \"Slow EMA period\", minval = 2)\n"
+            "emaFast = ta.ema(close, fastLen)\n"
+            "emaSlow = ta.ema(close, slowLen)\n"
+            "plot(emaFast, \"EMA Fast\", color = #FF9800)\n"
+            "plot(emaSlow, \"EMA Slow\", color = #2D8CFF)\n"
+            "plotshape(ta.crossover(emaFast, emaSlow), \"Cross Up\", shape.triangleup, location.belowbar, #22C55E)\n"
+            "plotshape(ta.crossunder(emaFast, emaSlow), \"Cross Down\", shape.triangledown, location.abovebar, #EF4444)\n"
         ),
     }
 
@@ -123,9 +106,15 @@ def save_user_indicator(
         raise ValueError("code is required")
 
     asset_type = "indicator"
-    is_safe, unsafe_reason = validate_code_safety(raw)
-    if not is_safe:
-        raise ValueError(f"Unsafe indicator code: {unsafe_reason}")
+    # ``validate_code_safety`` exists to fence the Python sandbox, and it starts
+    # by ``ast.parse``-ing the source -- which rejects every Pine script. The
+    # sandbox no longer executes indicators, so the compile check is the gate
+    # that matters here; it is the same one the IDE's save path applies.
+    from app.services.pine_validation import validate_pine_source
+
+    verdict = validate_pine_source(raw)
+    if not verdict.get("success"):
+        raise ValueError(f"Invalid Pine Script: {verdict.get('details') or verdict.get('error_type')}")
 
     meta = extract_indicator_meta_from_code(raw)
     name = (name or meta.get("name") or "").strip() or "Custom Indicator"

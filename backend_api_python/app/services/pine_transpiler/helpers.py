@@ -187,11 +187,26 @@ def _p_mask(condition):
     # resolves a ternary per bar paid it millions of times. Going through numpy
     # costs 10us for the same answer, and ``nan != 0`` keeps the incumbent
     # reading of a missing condition as false.
+    #
+    # The dtype is inspected before converting: a comparison already produced a
+    # ready-made bool block, and ``to_numpy(dtype="float64", na_value=0.0)``
+    # re-cast every element of it for nothing (20us of the 34us a full
+    # ``_p_where`` cost). Only blocks that can hold ``nan`` need the extra pass.
     try:
-        raw = condition.to_numpy(dtype="float64", na_value=0.0)
-        return pd.Series(np.nan_to_num(raw) != 0.0, index=condition.index, copy=False)
+        values = condition.to_numpy()
     except (TypeError, ValueError):
-        pass
+        values = None
+    if values is not None:
+        kind = values.dtype.kind
+        if kind == "b":
+            return pd.Series(values, index=condition.index, copy=False)
+        if kind in "iuf":
+            numbers = values.astype("float64", copy=False)
+            flags = numbers != 0.0
+            missing = np.isnan(numbers)
+            if missing.any():
+                flags = flags & ~missing
+            return pd.Series(flags, index=condition.index, copy=False)
     filled = condition.fillna(0)
     try:
         return filled.astype("bool")
@@ -206,27 +221,37 @@ def _p_mask(condition):
 def _p_where(condition, when_true, when_false):
     if not hasattr(condition, "fillna"):
         return when_true if bool(condition) else when_false
-    mask = _p_mask(condition)
-    true_series = hasattr(when_true, "fillna")
-    false_series = hasattr(when_false, "fillna")
     # Resolve through numpy whenever both branches can be handed to ``np.where``
     # as raw arrays. ``Series.mask`` copies the whole frame and re-enters pandas'
     # block manager (94us on a 300-bar frame); ``np.where`` costs 10us and yields
     # the same values. Strings and objects fall through to the mask path, which
     # preserves their dtype semantics.
+    #
+    # The mask is built inline rather than through ``_p_mask`` so the common
+    # numeric cases never pay for a second Series round trip: a ternary is the
+    # single hottest helper in a converted script, called once per bar per
+    # expression, and it accounted for 44% of a slow indicator's runtime.
     try:
-        left = when_true.to_numpy() if true_series else when_true
-        right = when_false.to_numpy() if false_series else when_false
-        if not isinstance(left, str) and not isinstance(right, str):
-            flags = mask.to_numpy() if hasattr(mask, "to_numpy") else bool(mask)
-            return pd.Series(
-                np.where(flags, left, right),
-                index=condition.index,
-                copy=False,
-            )
+        values = condition.to_numpy()
     except (TypeError, ValueError):
-        pass
-    if false_series and hasattr(when_false, "mask"):
+        values = None
+    if values is not None:
+        kind = values.dtype.kind
+        if kind in "biuf":
+            if kind == "b":
+                flags = values
+            else:
+                numbers = values.astype("float64", copy=False)
+                flags = numbers != 0.0
+                missing = np.isnan(numbers)
+                if missing.any():
+                    flags = flags & ~missing
+            left = when_true.to_numpy() if hasattr(when_true, "fillna") else when_true
+            right = when_false.to_numpy() if hasattr(when_false, "fillna") else when_false
+            if not isinstance(left, str) and not isinstance(right, str):
+                return pd.Series(np.where(flags, left, right), index=condition.index, copy=False)
+    mask = _p_mask(condition)
+    if hasattr(when_false, "fillna") and hasattr(when_false, "mask"):
         try:
             return when_false.copy().mask(mask, when_true)
         except (TypeError, ValueError):
@@ -766,13 +791,23 @@ def _p_str(value, pattern=None):
         return "nan"
     if isinstance(value, str):
         return value
+    if hasattr(value, "iloc") and hasattr(value, "empty"):
+        # Pine's ``str.tostring`` renders the current bar, and during a prefix
+        # replay the current bar is the last row. ``float(series)`` used to raise
+        # and fall through to ``str(series)``, which built a truncated repr of the
+        # whole block: wrong for a label, and 143us per call on a 300-bar frame.
+        if value.empty:
+            return "nan"
+        value = value.iloc[-1]
     try:
         number = float(value)
     except (TypeError, ValueError):
         return str(value)
     if number != number:
         return "nan"
-    if number == int(number) and abs(number) < 1e15:
+    # The magnitude test runs first: ``int(inf)`` raises ``OverflowError``, and a
+    # script that divided by zero can reach here with an infinity.
+    if abs(number) < 1e15 and number == int(number):
         return str(int(number))
     return str(number)
 

@@ -1,0 +1,26 @@
+//@version=6
+// Multi-Indicator Composite -- oscillator, levels and a histogram in a lower pane.
+//
+// Chart analysis only. Declared without overlay so it draws in its own pane
+// instead of on top of the candles.
+indicator("[Sample] Multi-Indicator Composite", overlay = false)
+
+rsiLength = input.int(14, "RSI length", minval = 2, maxval = 100, group = "RSI")
+overbought = input.float(70.0, "Overbought level", minval = 50.0, maxval = 100.0, group = "RSI")
+oversold = input.float(30.0, "Oversold level", minval = 0.0, maxval = 50.0, group = "RSI")
+fastLength = input.int(12, "MACD fast length", minval = 1, maxval = 200, group = "MACD")
+slowLength = input.int(26, "MACD slow length", minval = 2, maxval = 400, group = "MACD")
+signalLength = input.int(9, "MACD signal length", minval = 1, maxval = 100, group = "MACD")
+
+rsi = ta.rsi(close, rsiLength)
+[macdLine, signalLine, histogram] = ta.macd(close, fastLength, slowLength, signalLength)
+
+plot(rsi, "RSI", color = #7E57C2, linewidth = 2)
+
+// Fixed levels are hlines: they span the whole pane and are not per-bar data.
+hline(overbought, "Overbought", color = #ff5252, linestyle = hline.style_dashed)
+hline(oversold, "Oversold", color = #00e676, linestyle = hline.style_dashed)
+
+// A column plot colours each bar by its own sign.
+plot(histogram, "MACD histogram", color = histogram >= 0 ? #26A69A : #EF5350, style = plot.style_columns)
+plot(signalLine, "Signal", color = #FFB74D)

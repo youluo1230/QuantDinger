@@ -474,7 +474,7 @@ docker compose \
 
 | 领域 | 当前能力 |
 | --- | --- |
-| 指标 | Python 图表叠加、标记、区间和信号。 |
+| 指标 | Pine Script v6 图表叠加、标记和信号，在浏览器内执行。 |
 | 策略 | Strategy API V2 交易意图、仓位计算、风险控制、回测和实盘运行时。 |
 | 加密货币 | Binance、OKX、Bitget、Bybit、Gate、HTX 及可扩展适配器。 |
 | 传统券商 | IBKR 和 Alpaca 工作流。 |

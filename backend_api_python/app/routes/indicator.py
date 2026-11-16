@@ -59,14 +59,13 @@ logger = get_logger(__name__)
 indicator_blp = Blueprint("indicator", __name__)
 
 
-INDICATOR_IDE_SYSTEM_PROMPT = """You write production-ready QuantDinger chart indicators.
-The runtime provides pandas as `pd`, numpy as `np`, an OHLCV DataFrame named `df`, and a `params` dict.
-Keep every generated file chart-only: no orders, positions, schedules, leverage, network, file I/O, reflection, or dynamic execution.
-Use pandas Series for rolling, fill, shift, ewm, iloc, and list conversion. Coerce numpy results with
-`pd.Series(value, index=df.index)` before pandas-only operations so DatetimeIndex alignment is preserved.
-Visual markers should normally be one-bar events. A safe edge pattern is:
-`previous = condition.shift(1, fill_value=False).astype(bool)` followed by `condition & ~previous`.
-Return one complete Python source file only, without markdown fences or surrounding prose.
+INDICATOR_IDE_SYSTEM_PROMPT = """You write production-ready Pine Script v6 chart indicators for QuantDinger.
+Every script you write is compiled by the backend and executed in the user's browser by a Pine Script runtime.
+Keep every generated script chart-only: `indicator(...)`, never `strategy(...)`. No `strategy.entry`, no orders, no positions, no `alert()` side channels.
+Use the standard Pine library freely (`ta.*`, `math.*`, `str.*`, `array.*`, `request.security`). Do not `import`, and do not reference libraries the runtime does not ship.
+Draw with `plot`, `plotshape`, `plotchar`, `fill`, `bgcolor`, and `hline`. Return values that matter on the current bar; avoid `plot`-ing debug scaffolding.
+Declare knobs with `input.*` and give the input the display label and `group` the user should see in the settings dialog; never hardcode a period the user may want to change.
+Return one complete Pine Script file only, beginning with `//@version=6`, without markdown fences or surrounding prose.
 """
 
 
@@ -80,21 +79,19 @@ def _now_ts() -> int:
 
 def _extract_indicator_meta_from_code(code: str) -> Dict[str, str]:
     """
-    Extract indicator name/description from python code.
-    Expected variables:
-      my_indicator_name = "..."
-      my_indicator_description = "..."
+    Extract indicator name/description from the source code.
+
+    Pine scripts are named by their own declaration -- ``indicator("Name")`` --
+    which is the name TradingView shows and therefore the one the author
+    expects. The legacy ``my_indicator_name`` assignment is still honoured for
+    scripts written before the IDE was Pine-only.
     """
     if not code or not isinstance(code, str):
         return {"name": "", "description": ""}
 
-    # Simple assignment capture for single/double quoted strings.
-    name_match = re.search(r'^\s*my_indicator_name\s*=\s*([\'"])(.*?)\1\s*$', code, re.MULTILINE)
-    desc_match = re.search(r'^\s*my_indicator_description\s*=\s*([\'"])(.*?)\1\s*$', code, re.MULTILINE)
+    from app.services.pine_validation import extract_indicator_meta
 
-    name = (name_match.group(2).strip() if name_match else "")[:100]
-    description = (desc_match.group(2).strip() if desc_match else "")[:500]
-    return {"name": name, "description": description}
+    return extract_indicator_meta(code)
 
 
 def _insert_indicator_version(cur, indicator_id: int, user_id: int, name: str, description: str, code: str) -> int:
@@ -424,13 +421,14 @@ def save_indicator():
             return jsonify({"code": 0, "msg": "code is required", "data": None}), 400
 
         if not is_empty_code:
-            from app.utils.safe_exec import validate_code_safety
+            from app.services.pine_validation import validate_pine_source
 
-            is_safe_code, unsafe_reason = validate_code_safety(code)
-            if not is_safe_code:
+            verdict = validate_pine_source(code)
+            if not verdict.get("success"):
+                reason = str(verdict.get("details") or "the script does not compile")
                 return jsonify({
                     "code": 0,
-                    "msg": f"Unsafe indicator code: {unsafe_reason}",
+                    "msg": f"Invalid Pine Script: {reason}",
                     "data": None,
                 }), 400
 
@@ -911,8 +909,8 @@ def ai_generate():
             float(intent_decision.get("confidence") or 0.0),
         )
 
-    # QuantDinger indicator IDE: chart render only; strategies are separate script assets.
-    # Marker edge contract: shift(1, fill_value=False).astype(bool)
+    # QuantDinger indicator IDE: Pine studies drawn in the browser. Strategies are a
+    # separate asset kind and still run server-side for their backtests.
     system_prompt = INDICATOR_IDE_SYSTEM_PROMPT + "\n\n" + INDICATOR_GENERATION_CONTRACT
 
     def _generate_discussion_via_llm() -> str:
@@ -926,7 +924,7 @@ def ai_generate():
         discussion_system = """You are QuantDinger's indicator-code reviewer.
 Answer the user's question about the currently open indicator. Use the same language as the user.
 Explain concrete logic, parameters, plots, visual signals, edge cases, and limitations from the supplied source.
-Recognize native `line`, `bar`, `circle`, and `cloud` plots. A cloud uses per-bar `upper` and `lower` boundaries, optional per-bar color, restrained opacity, and `None` gaps; it is the preferred representation for a continuous band instead of repeated zone or box layers.
+The source is Pine Script: explain it in Pine terms -- `plot`, `plotshape`, `fill`, `input.*`, `ta.*`, and the `na` propagation rule -- rather than translating the question back into Python terms.
 Never claim that code was changed. Do not return a full replacement script and do not create a code candidate.
 When useful, cite short variable or function names from the source, but keep the answer concise and readable.
 Lead with the conclusion. By default use 4-8 short points and stay under 700 Chinese characters or 350 English words; only go deeper when the user explicitly asks for a detailed walkthrough.
@@ -956,7 +954,7 @@ If the question actually requests a code modification, explain what should chang
             "content": (
                 "# Current chart context\n"
                 + json.dumps(chart_context, ensure_ascii=False, default=str)
-                + "\n\n# Current indicator source (source of truth)\n```python\n"
+                + "\n\n# Current indicator source (source of truth)\n```pine\n"
                 + existing[:36000]
                 + "\n```\n\n# User question\n"
                 + prompt
@@ -1292,55 +1290,28 @@ If the question actually requests a code modification, explain what should chang
 @login_required
 def code_quality_hints():
     """
-    Heuristic hints + runtime smoke-execution for indicator code.
+    Static hints for the Pine script in the editor.
 
     Request body:
         code (required): Indicator source code
-        runtimeCheck (optional): Run the sandboxed smoke execution. Defaults to true.
 
-    Returns hints with severity, code, and params. Static analysis catches
-    structural issues; a sandboxed dry-run surfaces runtime errors before backtest.
+    Pine runs in the browser, so there is no equivalent of the previous
+    sandboxed dry-run here: the backend cannot execute the script even in
+    principle. What it can do is compile it, and a script that does not compile
+    is exactly what the author most needs told. The hints describe structure
+    (declaration, version, whether anything gets drawn); nothing here pretends
+    to know what the values will be.
     """
-    from app.services.indicator_code_quality import analyze_indicator_code_quality
+    from app.services.pine_validation import analyze_pine_quality, validate_pine_source
 
     data = request.get_json() or {}
     code_str = data.get("code") or ""
-    runtime_check = data.get("runtimeCheck", True) is not False
-    hints = analyze_indicator_code_quality(code_str)
 
-    # If static analysis already found a deterministic error, skip the dry-run.
-    # We do NOT skip on warn/info because those don't block execution and the user
-    # benefits from the runtime check finishing the picture.
-    has_static_error = any(h.get("severity") == "error" for h in hints)
-    if runtime_check and not has_static_error and code_str.strip():
-        try:
-            validation = _validate_indicator_code_internal(code_str)
-        except Exception as e:  # never let the smoke run break the endpoint
-            logger.warning("codeQualityHints dry-run crashed: %s", e)
-            validation = None
-
-        if validation is not None and not validation.get("success"):
-            error_type = validation.get("error_type") or "RuntimeError"
-            detail = validation.get("details") or validation.get("msg") or ""
-            # Trim noisy tracebacks: keep only the last meaningful line.
-            short_detail = ""
-            if detail:
-                for line in str(detail).strip().splitlines()[::-1]:
-                    line = line.strip()
-                    if line and not line.startswith("File "):
-                        short_detail = line[:300]
-                        break
-                if not short_detail:
-                    short_detail = str(detail).strip().splitlines()[-1][:300]
-            hints.append(
-                {
-                    "severity": "error",
-                    "code": "RUNTIME_ERROR_ON_VERIFY",
-                    "params": {
-                        "error_type": error_type,
-                        "detail": short_detail,
-                    },
-                }
-            )
+    # The validator carries the parse error, which is the one hint that always
+    # matters; quality hints add the non-blocking observations around it.
+    verdict = validate_pine_source(code_str)
+    hints = list(verdict.get("hints") or [])
+    if verdict.get("success"):
+        hints = analyze_pine_quality(code_str)
 
     return jsonify({"code": 1, "data": {"hints": hints}})

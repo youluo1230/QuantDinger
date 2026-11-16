@@ -193,6 +193,30 @@ def test_publishing_creates_the_row_the_chart_picker_reads(monkeypatch, chart_st
     assert inserts[0][1][1] == "[TV] Basis Breakout"
 
 
+def test_the_published_row_holds_the_pine_source_not_the_translation(monkeypatch, chart_stub):
+    """The browser runs Pine, so Python in that column is a broken indicator.
+
+    ``_publish`` used to receive ``result.code`` -- the translated Python -- and
+    that is what the IDE loaded. The chart handed it to the Pine runtime, and
+    every later conversion would have overwritten the author-readable source
+    with a machine translation of it.
+    """
+    source = "//@version=6\nindicator(\"Basis Breakout\", overlay = true)\nplot(close)"
+    cursor = _install_db(monkeypatch, _handler_for([_candidate_row(name="Basis Breakout", source=source)]))
+    chart_stub["result"] = _Result(True, code="output = {'name': 'x'}")
+    chart_stub["sandbox_result"] = {
+        "success": True,
+        "result": {"output": {"plots": [{"name": "Basis", "data": [1.0] * 40}], "signals": []}},
+    }
+
+    pipeline.convert_pending_indicators(limit=1, user_id=1, publish=True)
+
+    inserts = cursor.queries("INSERT INTO qd_indicator_codes")
+    assert inserts, cursor.executed
+    assert inserts[0][1][2] == source
+    assert "output = " not in inserts[0][1][2]
+
+
 def test_a_dry_run_publishes_nothing_but_still_scores(monkeypatch, chart_stub):
     cursor = _install_db(monkeypatch, _handler_for([_candidate_row()]))
     chart_stub["result"] = _Result(True, code="output = {}")

@@ -31,6 +31,21 @@ from app.utils.safe_exec import safe_exec_indicator_isolated
 
 logger = get_logger(__name__)
 
+# How long one chart preview may run before it is killed. The frontend asks for
+# 300 bars and the translated replay runs the whole script once per bar, so a
+# heavy script legitimately needs more than a trivial one; the ceiling exists to
+# bound a runaway loop, not to express a performance target.
+#
+# The 45s default sits above the conversion gate's own budget on purpose. The
+# gate runs a 200-bar sample, while the chart asks for up to 360 bars, and the
+# replay cost grows with the bar count: a script that passes the gate in 20s can
+# need 30s on a real chart. A preview ceiling below the gate would publish
+# indicators the IDE then refuses to open. It also has to stay under the 60s the
+# frontend client will wait, or the browser gives up before the server answers.
+INDICATOR_PREVIEW_TIMEOUT_SEC = max(
+    5, int(os.getenv("INDICATOR_PREVIEW_TIMEOUT_SEC", "45"))
+)
+
 
 def _json_loads(value: Any, fallback: Any) -> Any:
     if value is None:
@@ -252,6 +267,43 @@ def ensure_indicator_signal_alert_schema() -> None:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_indicator_signal_alerts_indicator_id ON qd_indicator_signal_alerts(indicator_id)")
         db.commit()
         cur.close()
+
+
+#: How long a transpiled indicator is reused. The translation is a pure
+#: function of the source, so the only thing that can invalidate it is a new
+#: transpiler version -- which changes the cache key.
+_TRANSPILE_CACHE_TTL_SEC = 6 * 60 * 60
+
+
+def _transpile_pine(source: str) -> str:
+    """Translate Pine source to the Python the sandbox runs.
+
+    Transpiling a large script takes longer than running it (a 116KB script
+    spends ~60s here), so the result is cached by source hash. Without this an
+    alert sweep would re-translate the same source on every tick.
+    """
+    import hashlib
+
+    from app.services.pine_transpiler.chart import transpile_indicator
+    from app.services.tradingview_indicators import INDICATOR_TRANSPILER_VERSION
+    from app.utils.cache import CacheManager
+
+    cache = CacheManager()
+
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:32]
+    key = f"pine:indicator:{INDICATOR_TRANSPILER_VERSION}:{digest}"
+    cached = cache.get(key)
+    if isinstance(cached, str) and cached:
+        return cached
+
+    result = transpile_indicator(source, name="")
+    if not result.ok or not result.code:
+        raise ValueError(
+            "Indicator could not be compiled: "
+            + str(result.error or result.blockers or "unknown reason")
+        )
+    cache.set(key, result.code, min(_TRANSPILE_CACHE_TTL_SEC, 24 * 60 * 60))
+    return result.code
 
 
 class IndicatorSignalAlertService:
@@ -690,11 +742,22 @@ class IndicatorSignalAlertService:
         return df
 
     def _execute_indicator(self, code: str, df: pd.DataFrame, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Run a stored indicator over the bars.
+
+        Stored code is Pine -- that is what the editor now holds -- but the
+        sandbox runs Python, so the source is transpiled first. A Python row
+        written before the migration still runs as-is, which is what keeps the
+        alerts of an unmigrated indicator working while its author rewrites it.
+        """
+        from app.services.indicator_params import looks_like_pine
+
+        executable = _transpile_pine(code)
+
         result = safe_exec_indicator_isolated(
-            code=code,
+            code=executable,
             df=df,
             params=params,
-            timeout=20,
+            timeout=INDICATOR_PREVIEW_TIMEOUT_SEC,
         )
         if not result.get("success"):
             raise RuntimeError(result.get("error") or "Indicator execution failed")

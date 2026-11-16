@@ -1111,6 +1111,80 @@ def test_ternaries_still_return_strings_untouched():
     assert list(resolved) == ["up", "flat", "up"]
 
 
+def test_a_boolean_condition_block_reaches_the_same_ternary_answers():
+    """A comparison result must resolve elementwise, like the float block does.
+
+    ``_p_where`` short-circuits on a ready-made bool block instead of re-casting
+    it to ``float64`` with ``na_value=0.0`` first. That is only legitimate while
+    the branch is still selected per element and the index is preserved, so both
+    spellings are pinned here: the bool block picks its branch bar by bar, and
+    the float block keeps reading a missing condition as false.
+    """
+    import numpy as np
+    import pandas as pd
+
+    namespace = _helper_namespace()
+    where = namespace["_p_where"]
+    mask = namespace["_p_mask"]
+
+    index = pd.date_range("2026-01-01", periods=6, freq="1min")
+    raw = pd.Series([1.0, 0.0, 2.0, -1.0, 0.0, 0.5], index=index)
+    when_true = pd.Series([10.0] * 6, index=index)
+    when_false = pd.Series([20.0] * 6, index=index)
+
+    numpy_booleans = pd.Series(np.array([True, False, True]), index=index[:3])
+    assert list(mask(numpy_booleans)) == [True, False, True]
+
+    # ``!= 0`` is the spelling the float path implements, so the two agree bar
+    # by bar once the condition is expressible as a boolean block.
+    from_bools = where(raw != 0.0, when_true, when_false)
+    from_floats = where(raw, when_true, when_false)
+
+    assert from_bools.index.equals(index)
+    assert from_floats.index.equals(index)
+    assert list(from_bools) == [10.0, 20.0, 10.0, 10.0, 20.0, 10.0]
+    assert list(from_floats) == [10.0, 20.0, 10.0, 10.0, 20.0, 10.0]
+
+    # A missing condition is false in both spellings. pandas makes ``nan != 0``
+    # true, so the comparison itself is not interchangeable with the float path
+    # there; only the shared reading is asserted.
+    missing = pd.Series([1.0, np.nan, 0.0], index=index[:3])
+    assert list(where(missing, when_true[:3], when_false[:3])) == [10.0, 20.0, 20.0]
+    assert list(where(pd.Series([True, False, False], index=index[:3]), when_true[:3], when_false[:3])) == [10.0, 20.0, 20.0]
+
+
+def test_a_string_label_reads_the_current_bar_not_the_whole_block():
+    """``str.tostring`` renders one bar's value, never a truncated block repr.
+
+    A label created from a series used to hit ``float(series)``, raise, and fall
+    through to ``str(series)``: the pane showed pandas' truncated repr of the
+    drawing instead of the reading at the current bar.
+    """
+    import numpy as np
+    import pandas as pd
+
+    namespace = _helper_namespace()
+    to_string = namespace["_p_str"]
+
+    index = pd.date_range("2026-01-01", periods=4, freq="1min")
+    values = pd.Series([1.0, 2.0, 3.5, np.nan], index=index)
+
+    assert to_string(values) == "nan"
+    assert to_string(values.iloc[:3]) == "3.5"
+    assert to_string(pd.Series([], dtype="float64")) == "nan"
+
+
+def test_a_non_finite_reading_still_stringifies():
+    """An infinity must not raise from inside the integer formatting branch."""
+    namespace = _helper_namespace()
+    to_string = namespace["_p_str"]
+
+    assert to_string(float("inf")) == "inf"
+    assert to_string(float("-inf")) == "-inf"
+    assert to_string(3.0) == "3"
+    assert to_string(3.5) == "3.5"
+
+
 def test_win_loss_counts_survive_a_second_run():
     """The incremental tally must reset when a new run starts.
 

@@ -11,9 +11,26 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+#: A Pine script declares itself with ``//@version=`` and an ``indicator(...)``
+#: or ``strategy(...)`` call. Both are absent from the Python indicators this
+#: module used to parse, so they are a reliable way to pick the grammar.
+_PINE_SOURCE_RE = re.compile(r"^\s*(?://\s*@version|\s*(?:indicator|strategy)\s*\()", re.MULTILINE)
+
+
+def looks_like_pine(source: str) -> bool:
+    """Whether ``source`` is Pine rather than the retired Python dialect."""
+    return bool(_PINE_SOURCE_RE.search(source or ""))
+
+
 class IndicatorParamsParser:
-    """Parse chart indicator ``# @param`` declarations."""
-    
+    """Parse the parameter declarations of an indicator source.
+
+    Two grammars are supported because both kinds of row exist in the database:
+    Pine scripts declare ``input.*`` calls, and the Python indicators written
+    before they were retired declared ``# @param`` comments. Pine wins whenever
+    the source looks like Pine, otherwise the comment grammar is tried.
+    """
+
     PARAM_PATTERN = re.compile(
         r'#\s*@param\s+(\w+)\s+(int|float|bool|str|string)\s+(\S+)\s*(.*)',
         re.IGNORECASE
@@ -49,6 +66,11 @@ class IndicatorParamsParser:
         params = []
         if not indicator_code:
             return params
+
+        if looks_like_pine(indicator_code):
+            from app.services.pine_validation import parse_pine_params
+
+            return parse_pine_params(indicator_code)
         
         for line in indicator_code.split('\n'):
             line = line.strip()
@@ -179,7 +201,14 @@ class IndicatorParamsParser:
             default = param['default']
             
             if name in user_params:
-                result[name] = cls._convert_value(str(user_params[name]), param_type)
+                supplied = user_params[name]
+                # A bool is decided by the checkbox, so it must not be re-read
+                # from its string form: ``str(False)`` is "False", and the text
+                # grammar only knows "1"/"true".
+                if param_type == 'bool' and isinstance(supplied, bool):
+                    result[name] = supplied
+                else:
+                    result[name] = cls._convert_value(str(supplied), param_type)
             else:
                 result[name] = default
         

@@ -1,0 +1,24 @@
+//@version=6
+// Dual EMA Viewer -- two averages, the gap shaded, crossovers marked.
+//
+// Chart analysis only. The fill follows the two plots it names, so it is drawn
+// exactly where the averages are and nowhere else.
+indicator("[Sample] Dual EMA Viewer", overlay = true)
+
+fastLength = input.int(12, "Fast EMA length", minval = 1, maxval = 500, group = "Settings")
+slowLength = input.int(26, "Slow EMA length", minval = 1, maxval = 500, group = "Settings")
+showFill = input.bool(true, "Shade the gap between the averages", group = "Settings")
+showMarkers = input.bool(true, "Mark crossovers", group = "Settings")
+
+fastEma = ta.ema(close, fastLength)
+slowEma = ta.ema(close, slowLength)
+
+// A fill needs the plot objects, not their values: name them so the two lines
+// and the band between them stay one drawing.
+fastLine = plot(fastEma, "Fast EMA", color = #2962FF, linewidth = 2)
+slowLine = plot(slowEma, "Slow EMA", color = #B71C1C, linewidth = 2)
+fill(fastLine, slowLine, color = showFill ? #2962FF1A : na, title = "Gap")
+
+// The crossover is a one-bar event, which is what a marker can express.
+plotshape(showMarkers and ta.crossover(fastEma, slowEma), title = "Bull cross", style = shape.triangleup, location = location.belowbar, color = #00e676, size = size.tiny)
+plotshape(showMarkers and ta.crossunder(fastEma, slowEma), title = "Bear cross", style = shape.triangledown, location = location.abovebar, color = #ff5252, size = size.tiny)

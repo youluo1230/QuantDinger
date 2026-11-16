@@ -4,9 +4,7 @@ from typing import Any, Dict
 import numpy as np
 import pandas as pd
 
-from app.services.indicator_code_quality import analyze_indicator_code_quality
 from app.services.indicator_params import IndicatorParamsParser
-from app.utils.safe_exec import safe_exec_indicator_isolated
 
 
 def generate_mock_df(length: int = 200) -> pd.DataFrame:
@@ -40,6 +38,22 @@ def merge_indicator_params(code: str, user_params: Dict[str, Any] | None = None)
 
 
 def validate_indicator_code(code: str, user_params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """Validate a Pine indicator script.
+
+    This used to run the script in the sandbox and inspect the ``output`` dict it
+    produced. Indicators now run in the browser, so the backend can no longer see
+    what they draw -- and inspecting a transpiled copy would only check code the
+    user never sees. What it can still check is that the script compiles.
+
+    The return shape is deliberately unchanged (``success``/``msg``/``error_type``/
+    ``details``/``plots_count``/``signals_count``/``hints``) so every caller, the
+    Agent API and the IDE's quality panel included, keeps working.
+
+    ``user_params`` is accepted and ignored: Pine reads its settings from
+    ``input.*`` declarations inside the script, so there is nothing to merge in.
+    """
+    from app.services.pine_validation import analyze_pine_quality, validate_pine_source
+
     raw = (code or "").strip()
     if not raw:
         return {
@@ -52,152 +66,28 @@ def validate_indicator_code(code: str, user_params: Dict[str, Any] | None = None
             "hints": [{"severity": "error", "code": "EMPTY_CODE", "params": {}}],
         }
 
-    hints = analyze_indicator_code_quality(raw)
-    df = generate_mock_df()
-    merged_params = merge_indicator_params(raw, user_params)
-    exec_result = safe_exec_indicator_isolated(
-        code=raw,
-        df=df,
-        params=merged_params,
-        timeout=20,
-    )
-    if not exec_result.get("success"):
-        error_detail = exec_result.get("error") or "Unknown error"
-        is_security = error_detail.startswith("Unsafe code rejected")
+    verdict = validate_pine_source(raw)
+    if not verdict.get("success"):
         return {
             "success": False,
-            "msg": f"{'Security' if is_security else 'Runtime'} Error: {error_detail}",
-            "error_type": "SecurityError" if is_security else "RuntimeError",
-            "details": error_detail,
+            "msg": verdict.get("details") or "The script does not compile.",
+            "error_type": verdict.get("error_type") or "PineParseError",
+            "details": verdict.get("details"),
             "plots_count": 0,
             "signals_count": 0,
-            "hints": hints,
+            "hints": list(verdict.get("hints") or []),
         }
 
-    output = (exec_result.get("result") or {}).get("output")
-    if output is None:
-        return {
-            "success": False,
-            "msg": "Missing 'output' variable. Your code must define an 'output' dictionary.",
-            "error_type": "MissingOutput",
-            "details": None,
-            "plots_count": 0,
-            "signals_count": 0,
-            "hints": hints,
-        }
-    if not isinstance(output, dict):
-        return {
-            "success": False,
-            "msg": f"'output' must be a dictionary, got {type(output).__name__}",
-            "error_type": "InvalidOutputType",
-            "details": None,
-            "plots_count": 0,
-            "signals_count": 0,
-            "hints": hints,
-        }
-    if "plots" not in output and "signals" not in output:
-        return {
-            "success": False,
-            "msg": "'output' dict should contain 'plots' or 'signals' list.",
-            "error_type": "InvalidOutputStructure",
-            "details": None,
-            "plots_count": 0,
-            "signals_count": 0,
-            "hints": hints,
-        }
-
-    plots = output.get("plots", [])
-    signals = output.get("signals", [])
-    layers = output.get("layers", [])
-    if not isinstance(layers, list):
-        return _validation_error(
-            "InvalidLayers",
-            "Output 'layers' must be a list.",
-            plots,
-            signals,
-            hints,
-        )
-    for plot in plots:
-        if "data" not in plot:
-            return _validation_error("InvalidPlot", f"Plot '{plot.get('name')}' missing 'data' field.", plots, signals, hints)
-        if len(plot["data"]) != len(df):
-            return _validation_error(
-                "LengthMismatch",
-                f"Plot '{plot.get('name')}' data length ({len(plot['data'])}) does not match DataFrame length ({len(df)}).",
-                plots,
-                signals,
-                hints,
-            )
-
-    for signal in signals:
-        if "data" not in signal:
-            return _validation_error("InvalidSignal", f"Signal '{signal.get('type')}' missing 'data' field.", plots, signals, hints)
-        if len(signal["data"]) != len(df):
-            return _validation_error(
-                "LengthMismatch",
-                f"Signal '{signal.get('type')}' data length ({len(signal['data'])}) does not match DataFrame length ({len(df)}).",
-                plots,
-                signals,
-                hints,
-            )
-
-    for layer_index, layer in enumerate(layers):
-        if not isinstance(layer, dict):
-            return _validation_error(
-                "InvalidLayer",
-                f"Layer {layer_index} must be a dictionary.",
-                plots,
-                signals,
-                hints,
-            )
-        layer_type = str(layer.get("type") or "").strip().lower()
-        if layer_type not in {"zone", "box", "rect", "area"}:
-            continue
-        top = layer.get("top")
-        bottom = layer.get("bottom")
-        if not _is_finite_number(top) or not _is_finite_number(bottom):
-            return _validation_error(
-                "InvalidZoneLayer",
-                f"Zone layer {layer_index} requires finite numeric 'top' and 'bottom' bounds.",
-                plots,
-                signals,
-                hints,
-            )
+    # A compile that succeeded cannot tell us how many series the script draws
+    # without running it, and running it is the browser's job.
     return {
         "success": True,
-        "msg": "Verification passed. Indicator code rendered successfully.",
+        "msg": "Pine Script compiles.",
         "error_type": None,
         "details": None,
-        "plots_count": len(plots),
-        "signals_count": len(signals),
-        "hints": hints,
-    }
-
-
-def _is_finite_number(value: Any) -> bool:
-    if isinstance(value, bool):
-        return False
-    try:
-        return bool(np.isfinite(float(value)))
-    except (TypeError, ValueError, OverflowError):
-        return False
-
-
-def _validation_error(
-    error_type: str,
-    message: str,
-    plots: list[Dict[str, Any]],
-    signals: list[Dict[str, Any]],
-    hints: list[Dict[str, Any]],
-) -> Dict[str, Any]:
-    return {
-        "success": False,
-        "msg": message,
-        "error_type": error_type,
-        "details": None,
-        "plots_count": len(plots),
-        "signals_count": len(signals),
-        "hints": hints,
+        "plots_count": 0,
+        "signals_count": 0,
+        "hints": analyze_pine_quality(raw),
     }
 
 

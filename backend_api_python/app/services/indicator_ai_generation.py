@@ -48,10 +48,12 @@ def _context_block(context: Mapping[str, Any]) -> str:
 
 def _strip_code_fences(content: Any) -> str:
     text = str(content or "").strip()
-    if text.startswith("```python"):
-        text = text[9:]
-    elif text.startswith("```"):
-        text = text[3:]
+    # Models label the fence with whatever language they decided this is. Any
+    # of them is the same fence; only its contents matter.
+    for fence in ("```pine", "```pinescript", "```python", "```"):
+        if text.startswith(fence):
+            text = text[len(fence):]
+            break
     if text.endswith("```"):
         text = text[:-3]
     return text.strip()
@@ -93,18 +95,16 @@ def generate_indicator_code_candidate(
     use_patch_response = bool(existing.strip())
     if existing:
         user_prompt = (
-            "# Existing QuantDinger indicator code (source of truth):\n\n```python\n"
+            "# Existing Pine Script (source of truth):\n\n```pine\n"
             + existing.strip()
             + "\n```\n\n# Change request:\n\n"
             + prompt
             + context_text
-            + "\n\nPreserve my_indicator_name/description, df = df.copy(), declared @param "
-            "values read via params.get(...), output dict with layers defaulting to [], and list "
-            "lengths == len(df). Do not emit execution columns, # @strategy, risk, sizing, "
-            "timeframe, or trade-direction settings. For visual signals, output one-bar event "
-            "markers by default; do not repeat markers on every bar while a condition remains "
-            "true. For every declared @param, the params.get fallback default must exactly "
-            "match the declared default. "
+            + "\n\nKeep the script runnable as-is: //@version=6, an indicator(...) "
+            "declaration, every tunable setting declared as input.*, and no reference to "
+            "the old Python runtime (df, params, output, pd, np, my_indicator_name, "
+            "# @param). Preserve plots, levels, and alerts the request did not ask to "
+            "change. "
             + code_edit_user_instruction()
         )
 
@@ -160,13 +160,13 @@ def generate_indicator_code_candidate(
         except CodeEditError as exc:
             logger.warning("indicator model patch rejected, retrying full candidate: %s", exc)
             fallback_prompt = (
-                "# Existing QuantDinger indicator code (source of truth):\n\n```python\n"
+                "# Existing Pine Script (source of truth):\n\n```pine\n"
                 + existing.strip()
                 + "\n```\n\n# Change request:\n\n"
                 + prompt
                 + context_text
-                + "\n\nReturn one complete replacement indicator source. Preserve behavior not "
-                "explicitly changed. Python only, without markdown or prose."
+                + "\n\nReturn one complete replacement Pine Script. Preserve behavior not "
+                "explicitly changed. Pine only, without markdown or prose."
             )
             content = llm.call_llm_api(
                 messages=[

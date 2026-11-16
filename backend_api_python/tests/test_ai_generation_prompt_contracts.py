@@ -106,62 +106,47 @@ def test_strategy_generation_prompt_matches_market_and_execution_boundaries():
     assert "Keep deployment `execution_mode` out of strategy source" in SCRIPT_STRATEGY_REPAIR_REQUIREMENTS
 
 
-def test_indicator_prompt_remains_chart_only():
-    assert "chart indicator is visual analysis code only" in INDICATOR_SYSTEM_CONTRACT
-    assert "must not open, close, size, backtest, or live trade" in INDICATOR_SYSTEM_CONTRACT
-    assert "initialize(context)" in INDICATOR_SYSTEM_CONTRACT
+def test_indicator_prompt_is_pine_and_chart_only():
+    assert "Pine Script" in INDICATOR_SYSTEM_CONTRACT
+    assert "runs in the user's browser" in INDICATOR_SYSTEM_CONTRACT
+    assert "//@version=6" in INDICATOR_SYSTEM_CONTRACT
+    assert "indicator(...)" in INDICATOR_SYSTEM_CONTRACT
+    # A strategy would run server-side for a backtest; the chart study contract
+    # must not leak that expectation into generated indicator code.
+    assert "cannot place orders from here" in INDICATOR_SYSTEM_CONTRACT
 
 
-def test_indicator_generation_prompt_uses_notification_safe_signal_contract():
-    assert "finite numeric value" in INDICATOR_GENERATION_CONTRACT
-    assert "Static `text` or `textData` labels never activate" in INDICATOR_GENERATION_CONTRACT
-    assert "Signal names are dynamic" in INDICATOR_GENERATION_CONTRACT
-    assert "does not restrict signal names" in INDICATOR_GENERATION_CONTRACT
-    assert "one-bar edge events" in INDICATOR_GENERATION_CONTRACT
-    assert "never emit `type='up'` or `type='down'`" in INDICATOR_GENERATION_CONTRACT
-    assert "never infer activation from `text` or `textData`" in INDICATOR_REPAIR_REQUIREMENTS
+def test_indicator_prompt_states_the_runtime_it_will_actually_meet():
+    # These two are the checks that stop a regression to the Python contract
+    # from looking harmless: Pine has no df, no params, and no imports.
+    assert "There is no `df` and no `params` dict" in INDICATOR_SYSTEM_CONTRACT
+    assert "Do not `import` a library that is not vendored" in INDICATOR_SYSTEM_CONTRACT
+    assert "ta`, `math`, `str`" in INDICATOR_SYSTEM_CONTRACT.replace("`ta`, `math`, `str`", "`ta`, `math`, `str`")
 
 
-def test_indicator_generation_prompt_preserves_pine_projection_semantics():
-    assert "Pine pivot backpainting is a visual exception" in INDICATOR_GENERATION_CONTRACT
-    assert "`extendRight=True`" in INDICATOR_GENERATION_CONTRACT
-    assert "Wilder/RMA seeding" in INDICATOR_GENERATION_CONTRACT
-    assert "canonical renderer style fields" in INDICATOR_GENERATION_CONTRACT
+def test_indicator_prompt_declares_settings_through_pine_inputs():
+    # The settings dialog is built from input.* declarations, so a hardcoded
+    # period is a setting the user can never change.
+    assert "input.*" in INDICATOR_SYSTEM_CONTRACT
+    assert "must not be a literal" in INDICATOR_SYSTEM_CONTRACT
 
 
-def test_indicator_generation_prompt_defines_zone_layer_contract():
-    assert "'top': number, 'bottom': number" in INDICATOR_GENERATION_CONTRACT
-    assert "never cloud-only `upper`/`lower`" in INDICATOR_GENERATION_CONTRACT
-    assert "connecting successive boxes with continuous line plots" in INDICATOR_GENERATION_CONTRACT
-    assert "final mutated fill, border, and dashed state" in INDICATOR_REPAIR_REQUIREMENTS
+def test_indicator_prompt_names_the_drawing_calls_that_reach_the_chart():
+    assert "`plot`, `plotshape`, `plotchar`, `plotcandle`, `plotarrow`" in INDICATOR_SYSTEM_CONTRACT
+    assert "display=display.none" in INDICATOR_SYSTEM_CONTRACT
 
 
-def test_indicator_generation_prompt_preserves_stateful_pine_object_lifecycle():
-    assert "chronological single-pass object state machine" in INDICATOR_GENERATION_CONTRACT
-    assert "freeze the previous object's endpoint and style" in INDICATOR_GENERATION_CONTRACT
-    assert "apply later `set_*` mutations only to the object currently referenced" in INDICATOR_GENERATION_CONTRACT
-    assert "merge support, resistance, bullish, bearish" in INDICATOR_GENERATION_CONTRACT
-    assert "never concatenate objects by semantic type" in INDICATOR_GENERATION_CONTRACT
-    assert "solid historical trend plot" in INDICATOR_GENERATION_CONTRACT
-    assert "two source points preserve the exact slope" in INDICATOR_GENERATION_CONTRACT
-    assert "without adding a distant autoscale point" in INDICATOR_GENERATION_CONTRACT
-    assert "Do not approximate the projection with a horizontal ray" in INDICATOR_GENERATION_CONTRACT
+def test_indicator_prompt_explains_na_and_repainting():
+    # Both are Pine-specific traps that produce a chart that looks right and is
+    # wrong, which is worse than one that looks broken.
+    assert "`na` propagates through arithmetic" in INDICATOR_SYSTEM_CONTRACT
+    assert "barstate.isconfirmed" in INDICATOR_SYSTEM_CONTRACT
 
 
-def test_indicator_generation_prompt_uses_native_cloud_contract():
-    assert "`line`, `bar`, `circle`, and `cloud`" in INDICATOR_GENERATION_CONTRACT
-    assert "'upper': number" in INDICATOR_GENERATION_CONTRACT
-    assert "'lower': number" in INDICATOR_GENERATION_CONTRACT
-    assert "Translate Pine `fill()`" in INDICATOR_GENERATION_CONTRACT
-    assert "never emit one `zone` or box layer per bar" in INDICATOR_GENERATION_CONTRACT
-    assert "Preserve valid `cloud` plots" in INDICATOR_REPAIR_REQUIREMENTS
-    assert "replace them with one `cloud` plot" in INDICATOR_REPAIR_REQUIREMENTS
-
-
-def test_indicator_generation_prompt_routes_sparse_price_events_to_signals():
-    assert "Pine `plotshape`, labels, diamonds" in INDICATOR_GENERATION_CONTRACT
-    assert "to `signals`, not to `circle` plots" in INDICATOR_GENERATION_CONTRACT
-    assert "do not change renderer or plot contracts" in INDICATOR_REPAIR_REQUIREMENTS
+def test_indicator_generation_prompt_forces_pine_and_nothing_else():
+    assert "Never emits Python" in INDICATOR_GENERATION_CONTRACT
+    assert "no `df`, no `params`, no `output` dict, and no `pd`/`np`" in INDICATOR_GENERATION_CONTRACT
+    assert "The Indicator IDE accepts Pine Script only" in INDICATOR_GENERATION_CONTRACT
 
 
 def test_indicator_generation_and_repair_prompts_are_english_only():
@@ -172,9 +157,14 @@ def test_indicator_generation_and_repair_prompts_are_english_only():
     assert "explicitly requests a target language" in INDICATOR_GENERATION_CONTRACT
 
 
-def test_indicator_generation_prompt_matches_runtime_sandbox():
-    assert "Do not use `locals()`" in INDICATOR_GENERATION_CONTRACT
-    assert "`pd` and `np` are preloaded" in INDICATOR_GENERATION_CONTRACT
+def test_indicator_repair_prompt_converts_python_relics_to_pine():
+    # Scripts saved before this change are Python. The repair prompt is what
+    # turns one into Pine when the user asks for a change.
+    assert "`df`, `params`, `output`" in INDICATOR_REPAIR_REQUIREMENTS
+    assert 'my_indicator_name = "' in INDICATOR_REPAIR_REQUIREMENTS
+    assert "input.<type>(...)" in INDICATOR_REPAIR_REQUIREMENTS
+    assert "plotshape" in INDICATOR_REPAIR_REQUIREMENTS
+    assert "Return Pine only" in INDICATOR_REPAIR_REQUIREMENTS
 
 
 def test_indicator_ide_hidden_prompt_is_english_and_uses_central_contract():
@@ -186,20 +176,22 @@ def test_indicator_ide_hidden_prompt_is_english_and_uses_central_contract():
 
     assert not re.search(r"[\u4e00-\u9fff]", ai_generate_source)
     assert '"\\n\\n" + INDICATOR_GENERATION_CONTRACT' in ai_generate_source
+    # The IDE prompt must not re-describe the Python import surface Pine has no
+    # concept of.
     assert "`locals()` is allowed" not in ai_generate_source
-    assert "shift(1, fill_value=False).astype(bool)" in ai_generate_source
-    assert "~s.shift(1).fillna(False)" not in ai_generate_source
-    assert "Recognize native `line`, `bar`, `circle`, and `cloud` plots" in ai_generate_source
+    assert "pandas as `pd`" not in ai_generate_source
 
 
-def test_indicator_quality_endpoint_can_skip_runtime_smoke_for_publishing():
+def test_indicator_quality_endpoint_reports_compile_errors_instead_of_a_smoke_run():
     route_path = Path(__file__).parents[1] / "app" / "routes" / "indicator.py"
     route_source = route_path.read_text(encoding="utf-8")
     start = route_source.index("def code_quality_hints():")
     quality_source = route_source[start:]
 
-    assert 'data.get("runtimeCheck", True) is not False' in quality_source
-    assert "if runtime_check and not has_static_error" in quality_source
+    # Pine runs in the browser, so a backend dry-run can only be a compile.
+    assert "validate_pine_source" in quality_source
+    assert "analyze_pine_quality" in quality_source
+    assert "runtimeCheck" not in quality_source
 
 
 def test_indicator_publish_enqueues_translation_off_the_request_path():
