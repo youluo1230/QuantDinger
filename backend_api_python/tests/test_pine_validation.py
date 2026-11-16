@@ -12,6 +12,7 @@ from app.services.pine_validation import (
     analyze_pine_quality,
     declaration_of,
     extract_indicator_meta,
+    parse_pine_params,
     pine_version,
     validate_pine_source,
 )
@@ -143,3 +144,31 @@ def test_a_legacy_study_without_a_title_is_told_so():
     verdict = validate_pine_source('//@version=4\nstudy(overlay=true)\nplot(close)')
     codes = {hint["code"] for hint in verdict["hints"]}
     assert "MISSING_SCRIPT_TITLE" in codes
+
+
+def test_a_legacy_input_takes_its_type_from_the_default():
+    # `input(1.8, ...)` is the pre-v5 spelling. Reading it as a string would
+    # render a decimal knob as a text box in the settings panel.
+    params = parse_pine_params(
+        '//@version=4\nstudy("x")\nsigma = input(1.8, step=0.1, title="Sigma")\n'
+    )
+    assert params[0]["type"] == "float"
+    assert params[0]["default"] == 1.8
+
+
+def test_a_legacy_integer_input_reads_as_an_integer():
+    params = parse_pine_params('//@version=4\nstudy("x")\nlen = input(30, title="Length")\n')
+    assert params[0]["type"] == "int"
+    assert params[0]["default"] == 30
+
+
+def test_a_legacy_string_input_stays_a_string():
+    params = parse_pine_params('//@version=4\nstudy("x")\ns = input("0700-1600", title="Session")\n')
+    assert params[0]["type"] == "str"
+    assert params[0]["default"] == "0700-1600"
+
+
+def test_a_typed_input_still_reports_its_own_type():
+    # The modern spelling names the type; inference must not override it.
+    params = parse_pine_params('//@version=6\nindicator("x")\nlen = input.int(30, title="Length")\n')
+    assert params[0]["type"] == "int"

@@ -387,6 +387,28 @@ def _string_literal(text: str) -> Optional[str]:
     return match.group(2) if match else None
 
 
+def _infer_input_type(default_text: str) -> str:
+    """The type a pre-v5 ``input(...)`` declaration implies.
+
+    The old spelling takes no type name: ``input(1.8, ...)`` is a float and
+    ``input("0700-1600", ...)`` is a string. Reading it as a string always would
+    render every numeric knob in an old script as a text box, which the author
+    then cannot type a decimal into.
+    """
+    raw = (default_text or "").strip()
+    if not raw:
+        return "str"
+    if _string_literal(raw) is not None:
+        return "str"
+    if raw in ("true", "false"):
+        return "bool"
+    if _HEX_COLOUR_RE.match(raw):
+        return "color"
+    if _NUMERIC_LITERAL_RE.match(raw):
+        return "int" if raw.lstrip("+-").isdigit() else "float"
+    return "str"
+
+
 def _literal_value(text: str, param_type: str) -> Any:
     """The literal a declaration shows as its default, or ``None``.
 
@@ -474,7 +496,6 @@ def parse_pine_params(source: str) -> List[Dict[str, Any]]:
         close_at = _match_paren(raw_source, open_at)
         if close_at == -1:
             break
-        param_type = _INPUT_TYPES.get(kind, "str")
         positional: List[str] = []
         named: Dict[str, str] = {}
         for arg in _split_args(raw_source[open_at + 1 : close_at]):
@@ -485,6 +506,9 @@ def parse_pine_params(source: str) -> List[Dict[str, Any]]:
                 positional.append(arg)
         default_text = named.get("defval") if "defval" in named else (positional[0] if positional else "")
         default_text = _resolve_constant(default_text, constants)
+        # `input.int(...)` names its type; the pre-v5 `input(...)` does not, and
+        # the type is whatever the default literal is.
+        param_type = _INPUT_TYPES.get(kind) or _infer_input_type(default_text)
         title_text = named.get("title") if "title" in named else (positional[1] if len(positional) > 1 else "")
         title_text = _resolve_constant(title_text, constants)
         # Real scripts pad titles with em spaces to hang them under a group
