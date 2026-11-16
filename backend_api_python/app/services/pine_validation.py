@@ -32,10 +32,14 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-#: Highest Pine version the browser runtime accepts. PineTS supports v5 and v6;
-#: older scripts are rejected up front rather than failing inside the runtime
-#: with a message the author cannot act on.
-MIN_SUPPORTED_VERSION = 5
+#: Lowest Pine version the chart can run.
+#:
+#: The browser runtime itself only accepts v5 and later, but the frontend
+#: translates an older script before running it (`pineUpgrade.js`), and the
+#: transpiler accepts v2 through v4 too -- so an old script is not an error here.
+#: Rejecting it would have the IDE refuse to publish a script its own chart can
+#: draw.
+MIN_SUPPORTED_VERSION = 2
 MAX_SUPPORTED_VERSION = 6
 
 #: ``//@version=6`` as Pine requires it: the first line, no leading whitespace.

@@ -21,7 +21,7 @@ plot(ta.sma(close, 14), color=#12B76A)
 def test_validation_accepts_a_script_that_compiles():
     result = _validate_indicator_code_internal(PLOT_ONLY)
     assert result["success"] is True
-    assert result["error_type"] is None
+    assert not result["error_type"]
     # Nothing was executed, so the counts are the honest zero rather than a
     # number guessed from the source.
     assert result["plots_count"] == 0
@@ -39,15 +39,14 @@ def test_validation_rejects_source_that_does_not_compile():
     assert result["details"]
 
 
-def test_validation_rejects_an_unsupported_version():
-    # The runtime executes v5 and v6; a v4 script would fail in the browser
-    # after a round trip, so it is cheaper to refuse it here.
+def test_validation_accepts_a_legacy_version_the_chart_can_translate():
+    # The runtime executes v5 and v6, but the frontend upgrades an older script
+    # before running it, so the save path must not refuse what the chart draws.
     result = _validate_indicator_code_internal(
         "//@version=4\nstudy(\"Legacy\")\nplot(close)\n"
     )
-    assert result["success"] is False
-    assert result["error_type"] == "UnsupportedVersion"
-    assert "4" in str(result["details"])
+    assert result["success"] is True
+    assert not result["error_type"]
 
 
 def test_validation_rejects_empty_source():

@@ -40,13 +40,22 @@ def test_an_empty_script_is_refused_rather_than_treated_as_a_draft():
     assert verdict["error_type"] == "EmptySource"
 
 
-def test_a_legacy_pine_version_is_refused_with_the_reason():
-    # PineTS runs v5 and v6 only. Letting v4 through would fail inside the
-    # browser runtime, far from where the author can fix it.
+def test_a_legacy_pine_version_is_accepted_because_the_chart_translates_it():
+    # The browser runtime runs v5 and v6, but the frontend translates an older
+    # script before running it. Refusing it here would block a script the chart
+    # can actually draw.
     verdict = validate_pine_source('//@version=4\nstudy("Old")\nplot(close)')
+    assert verdict["success"] is True
+    assert not verdict["error_type"]
+
+
+def test_a_prehistoric_pine_version_is_still_refused():
+    # v1 has no `//@version` convention at all and no `study`/`indicator`
+    # declaration the panel can name the script from.
+    verdict = validate_pine_source('//@version=1\nplot(close)')
     assert verdict["success"] is False
     assert verdict["error_type"] == "UnsupportedVersion"
-    assert "version 4" in verdict["details"]
+    assert "version 1" in verdict["details"]
 
 
 def test_a_future_version_is_accepted_with_a_warning():
