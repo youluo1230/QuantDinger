@@ -213,7 +213,7 @@ SCRIPT_STRATEGY_REPAIR_REQUIREMENTS += STRATEGY_INSTRUMENT_IDENTITY_CONTRACT
 
 INDICATOR_SYSTEM_CONTRACT = """# QuantDinger chart indicator contract (Pine Script)
 - Write Pine Script for a chart study. The script runs in the user's browser, not on a server.
-- Start every script with `//@version=6`. Versions 5 and 6 are supported; anything older is rejected before it reaches the chart.
+- Start every script with `//@version=6`. Versions 2 to 6 are accepted: v5 and v6 run as written and v2-v4 is translated on the way in, so an older script is never refused for its directive alone.
 - Declare the study with `indicator(...)` at column zero. Use `strategy(...)` only when the user asks for entries and exits; a strategy still draws its `plot()` output on this chart, but it cannot place orders from here.
 - Available libraries: the built-in Pine namespaces `ta`, `math`, `str`, `color`, `array`, `matrix`, `map`, `request`, `input`, `strategy`, `syminfo`, `timeframe`, `chart`. Do not `import` a library that is not vendored; an unresolved import fails the whole script.
 - Read bar data through `open`, `high`, `low`, `close`, `volume`, `hl2`, `hlc3`, `ohlc4`, `time`, `bar_index`. There is no `df` and no `params` dict.

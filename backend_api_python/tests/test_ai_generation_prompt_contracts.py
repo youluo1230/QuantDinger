@@ -121,7 +121,7 @@ def test_indicator_prompt_states_the_runtime_it_will_actually_meet():
     # from looking harmless: Pine has no df, no params, and no imports.
     assert "There is no `df` and no `params` dict" in INDICATOR_SYSTEM_CONTRACT
     assert "Do not `import` a library that is not vendored" in INDICATOR_SYSTEM_CONTRACT
-    assert "ta`, `math`, `str`" in INDICATOR_SYSTEM_CONTRACT.replace("`ta`, `math`, `str`", "`ta`, `math`, `str`")
+    assert "`ta`, `math`, `str`" in INDICATOR_SYSTEM_CONTRACT
 
 
 def test_indicator_prompt_declares_settings_through_pine_inputs():

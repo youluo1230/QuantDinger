@@ -66,7 +66,7 @@ def get_indicator_authoring_contract() -> Dict[str, Any]:
             "Backtest or broker/account configuration inside indicator code",
             "Imports (import TradingView/ta/7) unless the bundled library resolver supplies them",
             "More than one indicator()/strategy() declaration",
-            "Version below 5, or study(...) instead of indicator(...)",
+            "Version below 2, or study(...) instead of indicator(...)",
             "Natural language instead of Pine source",
         ],
         "starter_template": template,

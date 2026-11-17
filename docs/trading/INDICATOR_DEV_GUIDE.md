@@ -11,13 +11,15 @@ An indicator cannot place orders, backtest, run live trading, read an account, m
 
 Because the source is Pine, the language semantics are Pine's own: <code>ta.*</code> calculations, <code>[1]</code> history references, <code>var</code> persistence, <code>request.security()</code>, and <code>input.*</code> declarations behave the way they do on TradingView for the subset the browser runtime implements. What an indicator does not have here is an account, an order, or a position.
 
-Supported versions are **5 and 6**. The version directive must be the first line of the file:
+Supported versions are **2 through 6**. Version 5 and 6 scripts run as written; a
+script declaring v2, v3 or v4 is translated on the way in, and the panel says so
+rather than refusing it. The version directive must be the first line of the file:
 
 ~~~pine
 //@version=6
 ~~~
 
-Anything older than version 5 is refused before the script reaches the chart. A script that does not compile is refused at save time: <code>POST /api/indicator/saveIndicator</code> and the Agent Gateway save path answer HTTP 400 with <code>Invalid Pine Script: &lt;reason&gt;</code>. Saves are validated by the server's Pine compiler (<code>backend_api_python/app/services/pine_validation.py</code>, built on the <code>pynescript</code> parser), so a syntax error is reported where you can fix it rather than surfacing inside the chart.
+Anything older than version 2 is refused before the script reaches the chart. A script that does not compile is refused at save time: <code>POST /api/indicator/saveIndicator</code> and the Agent Gateway save path answer HTTP 400 with <code>Invalid Pine Script: &lt;reason&gt;</code>. Saves are validated by the server's Pine compiler (<code>backend_api_python/app/services/pine_validation.py</code>, built on the <code>pynescript</code> parser), so a syntax error is reported where you can fix it rather than surfacing inside the chart.
 
 ---
 
@@ -507,7 +509,7 @@ The IDE also reports non-blocking quality hints while you edit. They describe st
 | --- | --- | --- | --- |
 | <code>EMPTY_CODE</code> | error | the source is empty | provide a complete script |
 | <code>MISSING_PINE_VERSION</code> | warn | no <code>//@version=</code> line | make <code>//@version=6</code> the first line |
-| <code>UNSUPPORTED_PINE_VERSION</code> | error | the declared version is below 5 | rewrite the source for version 5 or later |
+| <code>UNSUPPORTED_PINE_VERSION</code> | error | the declared version is below 2 | rewrite the source for version 2 or later |
 | <code>UNKNOWN_PINE_VERSION</code> | warn | the declared version is above 6 | target 6, which is what the runtime implements |
 | <code>PINE_SYNTAX_ERROR</code> | error | the parser rejected the source | fix the reported line; the message carries the position |
 | <code>MISSING_SCRIPT_DECLARATION</code> | warn | no <code>indicator(...)</code> or <code>strategy(...)</code> call | add exactly one declaration on its own line |

@@ -745,12 +745,11 @@ class IndicatorSignalAlertService:
         """Run a stored indicator over the bars.
 
         Stored code is Pine -- that is what the editor now holds -- but the
-        sandbox runs Python, so the source is transpiled first. A Python row
-        written before the migration still runs as-is, which is what keeps the
-        alerts of an unmigrated indicator working while its author rewrites it.
+        sandbox runs Python, so the source is transpiled first. Rows written
+        before the migration were rewritten in place by
+        ``migrations/20261116_indicator_pine_source.sql``, so there is no
+        Python body left to run as-is.
         """
-        from app.services.indicator_params import looks_like_pine
-
         executable = _transpile_pine(code)
 
         result = safe_exec_indicator_isolated(

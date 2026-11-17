@@ -136,7 +136,7 @@
         "type": "object",
         "required": ["code"],
         "properties": {
-          "code":             { "type": "string", "description": "Python indicator source (max 512 KiB)" },
+          "code":             { "type": "string", "description": "Pine Script source, v2-v6 (max 512 KiB)" },
           "name":             { "type": "string" },
           "description":      { "type": "string" },
           "indicator_id":     { "type": "integer", "description": "Update existing row when set" },
@@ -420,7 +420,7 @@
     },
     "/api/agent/v1/indicators/authoring-contract": {
       "get": {
-        "summary": "Indicator I/O contract + starter Python template",
+        "summary": "Indicator I/O contract + starter Pine template",
         "x-scope-class": "R",
         "responses": { "200": { "description": "OK" } }
       }
@@ -435,7 +435,7 @@
         "responses": { "200": { "description": "OK" } }
       },
       "post": {
-        "summary": "Save indicator into private library (qd_indicator_codes)",
+        "summary": "Save a Pine indicator into the private library (qd_indicator_codes)",
         "x-scope-class": "W",
         "parameters": [{ "in": "header", "name": "Idempotency-Key", "required": true, "schema": { "type": "string", "maxLength": 120 } }],
         "requestBody": {
@@ -447,7 +447,7 @@
     },
     "/api/agent/v1/indicators/validate": {
       "post": {
-        "summary": "Sandbox-validate indicator code without persisting",
+        "summary": "Validate indicator Pine source without persisting",
         "x-scope-class": "R",
         "requestBody": {
           "required": true,

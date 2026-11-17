@@ -1,6 +1,6 @@
 # QuantDinger 指标开发指南
 
-> 适用对象：QuantDinger 的图表指标开发约定，使用 Pine Script v5/v6 编写
+> 适用对象：QuantDinger 的图表指标开发约定，使用 Pine Script v2–v6 编写
 > 读者：初次编写指标的作者、从 Python 指标或 TradingView 脚本迁移过来的开发者，以及审查 AI 生成代码的人
 
 QuantDinger 的图表指标是一段 Pine Script study。Indicator IDE 在用户浏览器里通过 PineTS（用 TypeScript 实现的 Pine 运行时）执行源码，源码原样存储在指标记录的 <code>qd_indicator_codes.code</code> 字段。图表上画出来的东西就是浏览器执行出来的东西：图表指标的任何数值都不在服务端计算。
@@ -11,13 +11,13 @@ QuantDinger 的图表指标是一段 Pine Script study。Indicator IDE 在用户
 
 因为源码是 Pine，所以语言语义就是 Pine 的语义：<code>ta.*</code> 计算、<code>[1]</code> 历史引用、<code>var</code> 跨 bar 状态、<code>request.security()</code>、<code>input.*</code> 声明，在浏览器运行时实现的子集内，行为与 TradingView 一致。指标没有的东西是账户、订单和持仓。
 
-支持的版本是 **5 和 6**。版本指令必须是文件的第一行：
+支持的版本是 **2 到 6**。v5、v6 的脚本按原样运行；声明为 v2、v3、v4 的脚本会在读入时翻译，面板里会说明这一点，而不是拒绝它。版本指令必须是文件的第一行：
 
 ~~~pine
 //@version=6
 ~~~
 
-低于版本 5 的脚本在到达图表之前就会被拒绝。不能编译的脚本在保存时被拒绝：<code>POST /api/indicator/saveIndicator</code> 和 Agent Gateway 的保存路径会返回 HTTP 400，内容为 <code>Invalid Pine Script: &lt;reason&gt;</code>。保存时的校验由服务端的 Pine 编译器执行（<code>backend_api_python/app/services/pine_validation.py</code>，基于 <code>pynescript</code> 解析器），所以语法错误会在你能修改的地方被指出，而不是等它进入图表之后才暴露。
+低于版本 2 的脚本在到达图表之前就会被拒绝。不能编译的脚本在保存时被拒绝：<code>POST /api/indicator/saveIndicator</code> 和 Agent Gateway 的保存路径会返回 HTTP 400，内容为 <code>Invalid Pine Script: &lt;reason&gt;</code>。保存时的校验由服务端的 Pine 编译器执行（<code>backend_api_python/app/services/pine_validation.py</code>，基于 <code>pynescript</code> 解析器），所以语法错误会在你能修改的地方被指出，而不是等它进入图表之后才暴露。
 
 ---
 
@@ -507,7 +507,7 @@ IDE 在编辑过程中还会报告非阻断的质量提示。它们描述结构�
 | --- | --- | --- | --- |
 | <code>EMPTY_CODE</code> | error | 源码为空 | 提供完整脚本 |
 | <code>MISSING_PINE_VERSION</code> | warn | 缺少 <code>//@version=</code> 行 | 把 <code>//@version=6</code> 放在第一行 |
-| <code>UNSUPPORTED_PINE_VERSION</code> | error | 声明的版本低于 5 | 把源码改写成版本 5 或更高 |
+| <code>UNSUPPORTED_PINE_VERSION</code> | error | 声明的版本低于 2 | 把源码改写成版本 2 或更高 |
 | <code>UNKNOWN_PINE_VERSION</code> | warn | 声明的版本高于 6 | 以 6 为目标，那是运行时实现的版本 |
 | <code>PINE_SYNTAX_ERROR</code> | error | 解析器拒绝了源码 | 修正报告的行；消息里带位置 |
 | <code>MISSING_SCRIPT_DECLARATION</code> | warn | 没有 <code>indicator(...)</code> 或 <code>strategy(...)</code> 调用 | 在独立一行加上恰好一处声明 |
