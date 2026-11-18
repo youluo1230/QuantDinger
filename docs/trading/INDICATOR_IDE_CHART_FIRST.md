@@ -108,18 +108,20 @@ venue when decoding fails, so callers that still pass `BTC/USDT` keep working.
 `GET/POST/DELETE /api/users/chart-templates` keeps its route and storage
 (`qd_users.chart_templates`), but the payload becomes a whole-chart snapshot:
 
+`workspace` is a sibling of `name` in the POST body; the row keeps its own
+name, and `version` is fixed at 1.
+
 ```json
 {
   "version": 1,
-  "name": "BTC 4h + ETH 1h",
   "layoutMode": 2,
   "activePane": 0,
   "editorOpen": false,
   "panes": [
     {
-      "symbol": "QD:crypto:swap:binance:BTC/USDT",
+      "symbol": "QD:Crypto:swap:binance:BTC/USDT",
       "timeframe": "4H",
-      "chartType": "candles",
+      "chartType": "candle_solid",
       "indicators": [
         {"id": 12, "name": "EMA cross", "params": {"fast": 12}, "visible": true}
       ]
