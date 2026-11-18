@@ -1,9 +1,9 @@
 # Fork workflow
 
 This checkout is a long-lived fork of an upstream product. It carries its own
-feature branches, its own sibling frontend checkout, and a read-only upstream
-tracker. That changes which branch is the base for new work and where frontend
-changes actually live.
+feature branches, its own sibling frontend checkout, and its own issue tracker
+on the fork. That changes which branch is the base for new work, where issues
+live, and where frontend changes actually live.
 
 Keep fork-specific rules in this file. It has no upstream counterpart, so it
 never conflicts when upstream is merged.
@@ -12,19 +12,25 @@ never conflicts when upstream is merged.
 
 | Remote | Repository | Role |
 | --- | --- | --- |
-| `upstream` | `OpenByteInc/QuantDinger` | read-only baseline and issue tracker |
-| `origin` | `brokermr810/QuantDinger` | read-only mirror |
-| `fork` | `youluo1230/QuantDinger` | push target |
+| `upstream` | `OpenByteInc/QuantDinger` | read-only baseline; never file here |
+| `origin` | `youluo1230/QuantDinger` | push target and issue tracker |
+
+`origin` must stay on the fork: the MattSkills deck resolves the repository from
+`git remote get-url origin` alone and has no picker, so an upstream `origin`
+makes the issue panel show the upstream backlog instead of this fork's tickets.
+`brokermr810/QuantDinger` used to hold that slot; it 301-redirects to
+`OpenByteInc/QuantDinger`, so it was only an alias of upstream and was dropped.
 
 ## Branch topology
 
 - The base branch for new backend work is `feat/tradingview-pipeline`, which
-  tracks `fork/feat/tradingview-pipeline`. `main` is only an upstream mirror.
+  tracks `origin/feat/tradingview-pipeline`. `main` tracks `upstream/main` and
+  is only an upstream mirror.
 - That branch carries the TradingView/Pine pipeline, the indicator workspace
   changes, and the `market_data` service. Check how far it has drifted with
   `git rev-list --left-right --count upstream/main...HEAD`.
 - Sync upstream by merging `upstream/main` into the feature branch. Do not
-  rebase or rewrite history that has already been pushed to `fork`.
+  rebase or rewrite history that has already been pushed to `origin`.
 - Cut new work from `feat/tradingview-pipeline`, not from `main`.
 
 ## Repositories and local layout

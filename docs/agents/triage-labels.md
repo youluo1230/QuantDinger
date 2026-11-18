@@ -16,15 +16,17 @@ Edit the "Label in our tracker" column to match whatever vocabulary you actually
 
 ## Current tracker state
 
-The table above is the intended vocabulary. On `OpenByteInc/QuantDinger` today only `wontfix` exists; the maintainers also use `bug`, `enhancement`, `documentation`, `question`, `needs-rfc`, `epic`, `roadmap`, `area:*`, `priority:*`, and `ready for contributors`.
+The table above is the intended vocabulary. The tracker is the fork `youluo1230/QuantDinger`, where the token has ADMIN, so none of the labels are blocked on a maintainer. Today the fork carries the GitHub defaults (`bug`, `enhancement`, `documentation`, `question`, `help wanted`, `wontfix`, …) and the `wayfinder:*` family; the four triage roles below are created on demand, and the MattSkills deck creates them automatically when it first labels a ticket.
 
-The contributor token is READ-only on that repo, so only a maintainer can create the four missing labels:
+Create any missing role with:
 
 ```bash
-gh label create needs-triage     --color FFFFFF --description "Maintainer needs to evaluate this issue"
-gh label create needs-info       --color FFFFFF --description "Waiting on reporter for more information"
-gh label create ready-for-agent  --color FFFFFF --description "Fully specified, ready for an AFK agent"
-gh label create ready-for-human  --color FFFFFF --description "Requires human implementation"
+gh label create -R youluo1230/QuantDinger needs-triage     --color FFFFFF --description "Maintainer needs to evaluate this issue"
+gh label create -R youluo1230/QuantDinger needs-info       --color FFFFFF --description "Waiting on reporter for more information"
+gh label create -R youluo1230/QuantDinger ready-for-agent  --color FFFFFF --description "Fully specified, ready for an AFK agent"
+gh label create -R youluo1230/QuantDinger ready-for-human  --color FFFFFF --description "Requires human implementation"
 ```
 
-Until they exist, `gh issue edit <n> --add-label needs-triage` fails with `HTTP 404: Not Found`. Write the intended triage state into a comment instead, and re-apply the label once a maintainer has created it. Do not let a failed label write block the actual work.
+`gh label` ignores `GH_REPO`, so the `-R` flag is required here: without it `gh` resolves to the `upstream` remote and the write fails against a read-only repo.
+
+On `OpenByteInc/QuantDinger` the same token is READ-only, so those roles can only be added by an upstream maintainer. Do not let a failed label write block the actual work; write the intended state into a comment instead.
