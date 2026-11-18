@@ -135,46 +135,59 @@ def list_chart_templates(user_id: int) -> list:
 
 
 def save_chart_template(user_id: int, data: dict[str, Any]) -> tuple[bool, str, dict | None]:
-    """Create or update a chart template."""
+    """Create or update a chart template.
+
+    Two shapes are accepted. The current one is a workspace snapshot
+    (`workspace`) carrying every pane, its symbol, interval, style and
+    indicators; the older one is a flat `indicators` list saved by the retired
+    chart workbench. Older templates are converted to a single pane so they
+    keep loading, and every saved template also carries a derived `indicators`
+    list so a client that predates the workspace shape still finds one.
+    """
     name = str(data.get("name") or "").strip()
     template_id = str(data.get("template_id") or "").strip()
-    indicators = data.get("indicators") or []
     if not name:
         return False, "Template name is required", None
     if len(name) > 80:
         return False, "Template name is too long", None
+
+    raw_workspace = data.get("workspace")
+    indicators = data.get("indicators") or []
     if not isinstance(indicators, list):
         return False, "Indicators must be a list", None
 
-    sanitized = [_sanitize_indicator(item) for item in indicators if isinstance(item, dict)]
-    sanitized = [item for item in sanitized if item]
+    if raw_workspace is None:
+        workspace, workspace_error = _workspace_from_legacy_indicators(indicators)
+    else:
+        workspace, workspace_error = normalize_workspace(raw_workspace)
+    if workspace_error:
+        return False, workspace_error, None
+
     now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     templates = _load_chart_templates(user_id)
+    payload = {
+        "name": name,
+        "workspace": workspace,
+        "indicators": _legacy_indicators_from_workspace(workspace),
+        "updated_at": now_iso,
+    }
 
     saved = None
-    updated_templates = []
-    if template_id:
-        for tpl in templates:
-            if isinstance(tpl, dict) and str(tpl.get("id") or "") == template_id:
-                tpl = {
-                    **tpl,
-                    "id": template_id,
-                    "name": name,
-                    "indicators": sanitized,
-                    "updated_at": now_iso,
-                }
-                saved = tpl
+    updated_templates: list[dict] = []
+    for tpl in templates:
+        if not isinstance(tpl, dict):
+            continue
+        if template_id and str(tpl.get("id") or "") == template_id:
+            saved = {**tpl, **payload, "id": template_id}
+            updated_templates.append(saved)
+        else:
             updated_templates.append(tpl)
-    else:
-        updated_templates = [tpl for tpl in templates if isinstance(tpl, dict)]
 
     if saved is None:
         saved = {
             "id": f"tpl_{int(time.time() * 1000)}",
-            "name": name,
-            "indicators": sanitized,
             "created_at": now_iso,
-            "updated_at": now_iso,
+            **payload,
         }
         updated_templates.append(saved)
 
@@ -277,6 +290,128 @@ def _store_chart_templates(user_id: int, templates: list) -> None:
         )
         db.commit()
         cur.close()
+
+
+MAX_WORKSPACE_PANES = 4
+MAX_WORKSPACE_BYTES = 64 * 1024
+VALID_LAYOUT_MODES = {1, 2, 4}
+
+
+def _sanitize_workspace_indicator(item: dict) -> dict | None:
+    indicator_id = str(item.get("id") or "").strip()
+    if not indicator_id or len(indicator_id) > 40:
+        return None
+    params = item.get("params") if isinstance(item.get("params"), dict) else {}
+    clean_params = {}
+    for key, value in list(params.items())[:40]:
+        name = str(key).strip()
+        if not name or len(name) > 80:
+            continue
+        if isinstance(value, (bool, int, float)) or value is None:
+            clean_params[name] = value
+        else:
+            clean_params[name] = str(value)[:200]
+    return {
+        "id": indicator_id,
+        "name": str(item.get("name") or "").strip()[:120],
+        "visible": bool(item.get("visible", True)),
+        "params": clean_params,
+    }
+
+
+def _sanitize_workspace_pane(item: dict) -> dict:
+    indicators = item.get("indicators")
+    indicators = indicators if isinstance(indicators, list) else []
+    clean = [
+        entry for entry in (
+            _sanitize_workspace_indicator(ind) for ind in indicators[:20] if isinstance(ind, dict)
+        ) if entry
+    ]
+    return {
+        "symbol": str(item.get("symbol") or "").strip()[:64],
+        "timeframe": str(item.get("timeframe") or "").strip()[:8],
+        "chartType": str(item.get("chartType") or "").strip()[:32],
+        "indicators": clean,
+    }
+
+
+def normalize_workspace(raw: Any) -> tuple[dict | None, str]:
+    """Validate and clamp the workspace snapshot the IDE archives."""
+    if not isinstance(raw, dict):
+        return None, "Workspace must be an object"
+    try:
+        encoded = json.dumps(raw, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return None, "Workspace must be JSON serialisable"
+    if len(encoded.encode("utf-8")) > MAX_WORKSPACE_BYTES:
+        return None, "Workspace is too large"
+
+    panes = raw.get("panes")
+    if not isinstance(panes, list) or not panes:
+        return None, "Workspace panes are required"
+    if len(panes) > MAX_WORKSPACE_PANES:
+        return None, f"Workspace supports at most {MAX_WORKSPACE_PANES} panes"
+    clean_panes = [_sanitize_workspace_pane(pane) for pane in panes if isinstance(pane, dict)]
+    if not clean_panes:
+        return None, "Workspace panes are required"
+
+    try:
+        layout_mode = int(raw.get("layoutMode") or 1)
+    except (TypeError, ValueError):
+        layout_mode = 1
+    if layout_mode not in VALID_LAYOUT_MODES:
+        layout_mode = 1
+    try:
+        active_pane = int(raw.get("activePane") or 0)
+    except (TypeError, ValueError):
+        active_pane = 0
+    active_pane = max(0, min(active_pane, len(clean_panes) - 1))
+
+    return {
+        "version": 1,
+        "layoutMode": layout_mode,
+        "activePane": active_pane,
+        "editorOpen": bool(raw.get("editorOpen", True)),
+        "panes": clean_panes,
+    }, ""
+
+
+def _legacy_workspace() -> dict:
+    return {
+        "version": 1,
+        "layoutMode": 1,
+        "activePane": 0,
+        "editorOpen": True,
+        "panes": [{"symbol": "", "timeframe": "", "chartType": "", "indicators": []}],
+    }
+
+
+def _workspace_from_legacy_indicators(indicators: list) -> tuple[dict | None, str]:
+    converted = [
+        entry for entry in (
+            _sanitize_workspace_indicator(ind) for ind in indicators if isinstance(ind, dict)
+        ) if entry
+    ]
+    workspace = _legacy_workspace()
+    workspace["panes"][0]["indicators"] = converted
+    return workspace, ""
+
+
+def _legacy_indicators_from_workspace(workspace: dict) -> list:
+    panes = workspace.get("panes") or [{}]
+    pane = panes[0] if panes else {}
+    return [
+        {
+            "id": entry["id"],
+            "instanceId": f"tpl_{entry['id']}",
+            "name": entry.get("name", ""),
+            "type": "pine",
+            "visible": entry.get("visible", True),
+            "params": entry.get("params", {}),
+            "style": {},
+        }
+        for entry in pane.get("indicators") or []
+    ]
 
 
 def _sanitize_indicator(item: dict) -> dict | None:
