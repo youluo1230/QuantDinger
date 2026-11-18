@@ -8,7 +8,8 @@ This is the canonical instruction file for coding agents working in this reposit
 - `mcp_server/`: the tenant-scoped MCP client/server package backed by QuantDinger APIs.
 - `docs/`: product, architecture, deployment, API, Agent Gateway, and trading documentation.
 - `docker-compose*.yml` and `scripts/`: deployment topology and lifecycle tooling.
-- Frontend source is maintained outside this repository. The prebuilt frontend image is configured by the `frontend` service in `docker-compose.yml`.
+- Frontend and mobile source live in the separate `QuantDinger-Vue` and `QuantDinger-Mobile` repositories under their own source-available licences; the default Compose topology consumes their prebuilt `frontend` and `mobile` images.
+- This checkout is a fork. Remote topology, the base branch for new work, the sibling frontend checkout, and the local build overrides are in [fork workflow](docs/agents/fork-workflow.md).
 
 ## Read by task
 
@@ -16,6 +17,7 @@ Read only the documentation relevant to the change:
 
 - Agent Gateway or MCP: [Agent documentation](docs/agent/README.md), [Agent OpenAPI](docs/agent/agent-openapi.json), and [MCP package documentation](mcp_server/README.md).
 - Strategy API, backtests, or trading behavior: [Strategy development guide](docs/trading/STRATEGY_DEV_GUIDE.md) and [live-trading safety](docs/trading/LIVE_TRADING_SAFETY.md).
+- Indicators, Pine scripts, or the TradingView pipeline: [Indicator development guide](docs/trading/INDICATOR_DEV_GUIDE.md), [TradingView pipeline](docs/trading/TRADINGVIEW_PIPELINE.md), and [realtime chart plan](docs/trading/REALTIME_CHART_PLAN.md).
 - Runtime ownership, concurrency, Kafka, workers, or durable state: [architecture index](docs/architecture/README.md) and the task-specific document it links.
 - HTTP contracts: [API conventions](docs/architecture/API_CONVENTIONS.md) and the applicable OpenAPI document.
 - Installation or operations: the root [README](README.md) and the applicable guide under `docs/deployment/`.
@@ -42,5 +44,7 @@ Read only the documentation relevant to the change:
 - Run focused backend tests from `backend_api_python/` with `python -m pytest tests/<test_file>.py -q`.
 - Agent contract coverage lives in `backend_api_python/tests/test_ai_agent_contract_alignment.py` and related `test_agent_*.py` files.
 - MCP tests live in `mcp_server/tests/`.
+- Pine runtime changes: `python -m pytest tests/test_pine_transpiler_corpus.py -q` from `backend_api_python/`, pointing `PINE_TRANSPILER_CORPUS` at a local corpus. The suite skips when no corpus is present, so a skip is not a pass.
+- Documentation changes: run `python scripts/check_docs.py` from the repository root.
 - Validate Compose changes with `docker compose config --quiet` before exercising the affected services.
 - Match verification depth to risk; trading, migrations, tenancy, and distributed ownership require targeted regression tests.
