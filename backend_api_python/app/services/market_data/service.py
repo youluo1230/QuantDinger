@@ -129,7 +129,13 @@ class MarketDataService:
             return CandleResult(bars=[], source="none")
 
         ranges = self._repository.read_ranges(stream)
-        gaps = missing_intervals(ranges, start, end)
+        # ``spacing`` is the bar length, so the gap arithmetic knows that two
+        # neighbouring bars one period apart are not one second short of
+        # coverage. Without it a warm weekly series reports a hole between every
+        # pair of adjacent stored ranges and the fill re-asks upstream forever.
+        gaps = missing_intervals(
+            ranges, start, end, spacing=timeframe_seconds(stream.timeframe)
+        )
         fetched = 0
         errors: List[str] = []
 
@@ -173,8 +179,9 @@ class MarketDataService:
         does not want to carry a year of bars through the request.
         """
         start, end = int(start), int(end)
+        seconds = timeframe_seconds(stream.timeframe)
         ranges = self._repository.read_ranges(stream)
-        gaps = missing_intervals(ranges, start, end)
+        gaps = missing_intervals(ranges, start, end, spacing=seconds)
         if not gaps:
             return {
                 "requested": [start, end],
@@ -184,7 +191,9 @@ class MarketDataService:
                 "errors": [],
             }
         fetched, errors = self._fill_gaps(stream, gaps)
-        remaining = missing_intervals(self._repository.read_ranges(stream), start, end)
+        remaining = missing_intervals(
+            self._repository.read_ranges(stream), start, end, spacing=seconds
+        )
         return {
             "requested": [start, end],
             "missing": gaps,
@@ -231,11 +240,38 @@ class MarketDataService:
         seconds = timeframe_seconds(stream.timeframe)
         wanted = max(1, int(limit or 300))
         ranges = self._repository.read_ranges(stream)
+        # The newest N bars reach up to *now*, not up to the newest stored bar.
+        # Anchoring the right edge on stored coverage looks stable but means the
+        # store can never advance: the window ends where the data ends, so the
+        # tail beyond it is never inside the window and never fetched. A warm
+        # weekly series then serves bars that stop sixteen days ago, and no
+        # amount of refreshing moves it.
+        anchor = int(time.time())
         if ranges:
-            anchor = max(item.covered_to for item in ranges)
-        else:
-            anchor = int(time.time())
-        return anchor - seconds * wanted, anchor
+            newest = max(item.covered_to for item in ranges)
+            if anchor - seconds * wanted > newest:
+                # The store's data ends before this window even begins, so the
+                # venue has published nothing newer (a delisted symbol, or a
+                # stream nothing refreshes). Anchoring on the clock would answer
+                # a request for "the newest N bars" with nothing at all; anchor
+                # on the newest stored bar instead so the caller still gets the
+                # history that exists.
+                anchor = newest
+        start = anchor - seconds * wanted
+        if ranges:
+            # Never ask again for history the venue has already told us it does
+            # not have. A chart asking for the newest 1500 weekly bars reaches
+            # back to 1998, but BTC has no weekly bar before 2017, so that
+            # prefix is a gap that can never close: the fill asks six venues,
+            # each refuses, and the next identical request pays for it again.
+            # The earliest stored bar is exactly the evidence of where this
+            # stream's history begins -- the ledger only records bars that
+            # actually came back -- so the window starts there instead. Bars
+            # beyond it do not exist to be returned, so nothing is withheld.
+            earliest = min(item.covered_from for item in ranges)
+            if start < earliest:
+                start = earliest
+        return start, anchor
 
     def _fill_gaps(
         self, stream: CandleStream, gaps: Sequence[tuple[int, int]]
@@ -281,9 +317,12 @@ class MarketDataService:
         """
         # Both bounds are bar boundaries, and they align in opposite directions.
         #
-        # The lower bound rounds *up*. A gap begins one second after the last
-        # covered bar, so rounding down would re-request that stored bar; the
-        # fetch would then look like it missed and the gap would never close.
+        # The lower bound only needs to be exclusive of the last stored bar, and
+        # a gap already starts exactly one second after it, so it is used as
+        # given. Snapping it up to an epoch multiple is wrong: bars begin on the
+        # venue's calendar grid, not on the epoch's, so rounding a Monday up to
+        # the next Thursday skips the very bar the fill was opened for and the
+        # gap can never close.
         #
         # The upper bound is the last bar that has already closed, and it is
         # handed to the venue as an *exclusive* cutoff because sources filter
@@ -292,9 +331,6 @@ class MarketDataService:
         # forming, and the source's coverage check then rejects the whole
         # window rather than trimming it.
         start = int(start)
-        if start % seconds:
-            start += seconds - start % seconds
-        end = int(end) - int(end) % seconds
         # ``now // seconds * seconds`` is the start of the bar that is *still
         # forming*, not the last finished one, so anchoring on it asks for a bar
         # the venue has not published yet. The sources compute an expected row
@@ -302,6 +338,8 @@ class MarketDataService:
         # so one missing trailing bar loses every bar in the answer — the read
         # then looks like "this symbol has no data" while the venue has all of
         # it. Step back one bar so the window ends on data that exists.
+        #
+        end = int(end) - int(end) % seconds
         last_closed = (int(time.time()) // seconds - 1) * seconds
         if end > last_closed:
             end = last_closed

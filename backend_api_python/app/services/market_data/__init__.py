@@ -19,6 +19,7 @@ call silently skip the missing ten months.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -422,17 +423,30 @@ def merge_coverage(ranges: Iterable[CoveredRange]) -> List[CoveredRange]:
 
 
 def missing_intervals(
-    ranges: Iterable[CoveredRange], start: int, end: int
+    ranges: Iterable[CoveredRange], start: int, end: int, *, spacing: int = 1
 ) -> List[Tuple[int, int]]:
     """Return the sub-intervals of ``[start, end]`` that are not covered.
 
     This is the whole point of the ledger: it turns "do we need to download" into
     arithmetic on a handful of rows instead of a scan over stored bars.
+
+    ``spacing`` is the length of one bar in seconds, and it matters because
+    ``covered_from``/``covered_to`` are the times of bars that exist, not
+    inclusive second ranges. Two stored bars one period apart are neighbours: in
+    a weekly series a range ending at one Monday and another starting the next
+    Monday describe *consecutive* bars, yet subtracting one second leaves a
+    ``spacing - 1`` hole that no bar could ever occupy. Reporting it made the
+    fill re-ask the venues for that hole on every single request, always got
+    nothing back, and paid the full failover cost each time. A gap can only be
+    real when it is wide enough to hold a bar, so anything narrower is dropped
+    here rather than chased upstream. The default of 1 keeps the "every second
+    is a bar" reading used by the arithmetic tests.
     """
     lowest = int(start)
     highest = int(end)
     if highest < lowest:
         return []
+    bar = max(1, int(spacing))
     gaps: List[Tuple[int, int]] = []
     cursor = lowest
     for item in merge_coverage(ranges):
@@ -441,15 +455,52 @@ def missing_intervals(
         if item.covered_from > highest:
             break
         if item.covered_from > cursor:
-            gaps.append((cursor, min(item.covered_from - 1, highest)))
+            # The hole between the previous stored bar and this one. A bar
+            # occupies ``space`` seconds, so a hole narrower than one bar holds
+            # nothing and is skipped.
+            if item.covered_from - cursor >= bar:
+                gaps.append((cursor, min(item.covered_from - 1, highest)))
         cursor = max(cursor, item.covered_to + 1)
         if cursor > highest:
             break
     if cursor <= highest:
-        gaps.append((cursor, highest))
+        # The tail differs from an interior hole and needs its own test.
+        #
+        # An interior hole is bounded by stored bars on both sides, so a hole a
+        # period wide is definitely missing data. A tail has no right-hand
+        # bound: it runs up to the request, and the bar that would fill it may
+        # simply not have closed yet. Asking anyway is what made a warm series
+        # pay the full venue failover on every single read, because the venue
+        # correctly withholds a forming bar and every caller below just reports
+        # "no rows".
+        #
+        # Whether a bar has *closed* is a fact about the clock, never about the
+        # requested window. The stored phase is known (the last stored bar is
+        # one), so the next bar begins ``bar`` later and is complete only once
+        # ``2 * bar`` has passed since the stored bar began. Until then nothing
+        # later can be complete either, and the tail holds nothing fetchable.
+        # This is deliberately anchored on the wall clock rather than on
+        # ``highest``: a live-edge request passes "now" there, which says
+        # nothing about closure, and a short historical request passes a time
+        # that may sit inside a bar.
+        last_stored = max(
+            (item.covered_to for item in merge_coverage(ranges)), default=None
+        )
+        if last_stored is None:
+            gaps.append((cursor, highest))
+        elif (
+            last_stored + bar <= highest
+            and last_stored + 2 * bar <= int(time.time())
+        ):
+            # A bar has to fit before the request ends *and* have had time to
+            # close. Without the first half a window that stops a few seconds
+            # past the last stored bar would report a sub-bar hole.
+            gaps.append((cursor, highest))
     return gaps
 
 
-def covered_within(ranges: Iterable[CoveredRange], start: int, end: int) -> bool:
+def covered_within(
+    ranges: Iterable[CoveredRange], start: int, end: int, *, spacing: int = 1
+) -> bool:
     """True when every second of ``[start, end]`` sits inside stored coverage."""
-    return not missing_intervals(ranges, start, end)
+    return not missing_intervals(ranges, start, end, spacing=spacing)

@@ -255,12 +255,22 @@ def test_a_chart_bar_count_becomes_a_window_anchored_on_stored_data(monkeypatch)
 
 
 def test_a_gap_starting_mid_bar_does_not_rerequest_the_stored_bar(monkeypatch):
-    """The lower bound rounds up, or the gap can never close.
+    """The lower bound must exclude the stored bar, or the gap can never close.
 
     ``missing_intervals`` returns one second past the last covered bar. Feeding
     that to the venue as-is asks for a bar that is already stored; the fetch
     then "finds" it, records the same coverage, and the next read computes the
     identical gap -- which is exactly the loop this guards.
+
+    This used to also require the bound to land on an epoch multiple, and that
+    half of the assertion was the bug rather than the guard. Venues start bars
+    on a calendar grid, not on the unix epoch -- a weekly series opens on Monday
+    while the epoch's week boundaries are Thursdays -- so rounding the bound up
+    to an epoch multiple can jump *forward over the very bar the fill was opened
+    for*. On weekly data that skipped a real Monday bar and rolled a one-week
+    tail into the next grid step; the gap then never closed because the bar that
+    would have closed it sat behind the bound. Excluding the stored bar is the
+    invariant; boundary alignment is not.
     """
     repository = _Repository(
         bars=[CandleBar(time=3600, open=1, high=1, low=1, close=1)],
@@ -278,9 +288,9 @@ def test_a_gap_starting_mid_bar_does_not_rerequest_the_stored_bar(monkeypatch):
     service.get_candles(_stream(), start=3600, end=3600 * 5)
 
     assert requested
-    after = requested[0][0]
-    assert after % 3600 == 0, f"lower bound must land on a bar boundary, got {after}"
+    after, before = requested[0]
     assert after > 3600, "the stored bar must not be requested again"
+    assert before > after, "the window must still be a forward one"
 
 
 def test_the_venue_cutoff_is_past_the_last_wanted_bar(monkeypatch):

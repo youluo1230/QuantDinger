@@ -109,6 +109,12 @@ class CryptoDataSource(BaseDataSource):
 
     _SINGLE_FETCH_HARD_CAP = 300
 
+    # Fewest bars to ask a venue for. A windowed request for a single bar
+    # returns nothing on every public client measured (okx, binance, gate,
+    # bybit): they resolve a window by locating anchors, and a one-bar span
+    # gives them none. The extra bars are trimmed by ``filter_and_limit``.
+    _MIN_REQUEST_BARS = 2
+
     _RECENT_CANDLE_LIMITS: Dict[str, int] = {
         "gate": 10000,
         "htx": 2000,
@@ -658,10 +664,30 @@ class CryptoDataSource(BaseDataSource):
                     int((int(before_time) - int(after_time)) / timeframe_seconds),
                 )
                 coverage_ratio = len(klines) / expected_rows
+                # A ratio floor of 0.98 is unreachable for a short window and
+                # needless for a long one:
+                #
+                # * The window bounds are whole `timeframe_seconds` steps from
+                #   the unix epoch, but the venue anchors its bars to a calendar
+                #   grid (weekly bars start on a Monday, a week-multiple of the
+                #   epoch starts on a Thursday), so the last bar that can exist
+                #   inside the window is up to one full bar short of it.
+                # * The bar at the right edge is still forming and is correctly
+                #   withheld by `closed_only`.
+                #
+                # Together those legitimately cost about one row, which is fatal
+                # at 7/8 (0.875) and harmless at 496/497, so the flat floor
+                # rejected exactly the small requests. What actually distinguishes
+                # a truncated answer from a complete one is whether the series
+                # *starts* where it was asked to: a venue serving only its recent
+                # page comes back with a much later `klines[0]`, which the
+                # left-edge check below already refuses. So the floor drops to a
+                # single row of slack and the edge checks stay the real gate.
+                short_of_expected = len(klines) < expected_rows - 1
                 if (
                     int(klines[0]["time"]) > int(after_time) + tolerance_seconds
-                    or int(klines[-1]["time"]) < int(before_time) - tolerance_seconds
-                    or coverage_ratio < 0.98
+                    or int(klines[-1]["time"]) < int(before_time) - timeframe_seconds * 2
+                    or short_of_expected
                 ):
                     self._set_last_failure(
                         "Incomplete K-line coverage after normalization: "
@@ -946,7 +972,15 @@ class CryptoDataSource(BaseDataSource):
                         1,
                         (end_ms - current_since + timeframe_ms - 1) // timeframe_ms,
                     )
-                    request_limit = min(batch_limit, remaining_bars)
+                    # Ask for at least two bars even when the window has room
+                    # for one. A one-bar window resolves to nothing on okx,
+                    # binance, gate and bybit alike: their windowed endpoints
+                    # locate the request by anchors and a single-bar span gives
+                    # them none. That made the newest-bar fill impossible, so a
+                    # warm series could never advance past its last stored bar
+                    # no matter how often it was refreshed. The surplus bar is
+                    # trimmed by `filter_and_limit` afterwards.
+                    request_limit = min(batch_limit, max(self._MIN_REQUEST_BARS, remaining_bars))
                     for attempt in range(retry_per_batch + 1):
                         try:
                             if native_client:
@@ -1014,8 +1048,19 @@ class CryptoDataSource(BaseDataSource):
                 # Never attach an old partial page across an unreported gap. Only
                 # validate the returned chart tail, not its extra warmup buffer.
                 checked_rows = ohlcv if after_time is not None else ohlcv[-limit:]
+                # One bar of slack on the right edge is not enough. `end_ms`
+                # comes from an epoch-aligned cutoff (the caller walks back in
+                # whole `timeframe_ms` steps from the unix epoch), but a venue
+                # anchors its own bars to a calendar grid we do not share: the
+                # weekly bars here start on Mondays while a week-multiple of the
+                # epoch starts on a Thursday. The newest *closed* bar can
+                # therefore begin almost a full bar before the cutoff, and a
+                # one-bar tolerance rejected the answer outright -- which is how
+                # a perfectly complete weekly series came back as zero rows.
+                # Two bars still catch a genuinely stale tail: one whole missing
+                # bar plus the phase offset is the most this can mask.
                 if (
-                    int(checked_rows[-1][0]) < end_ms - timeframe_ms
+                    int(checked_rows[-1][0]) < end_ms - timeframe_ms * 2
                     or any(int(b[0]) - int(a[0]) != timeframe_ms
                            for a, b in zip(checked_rows, checked_rows[1:]))
                 ):

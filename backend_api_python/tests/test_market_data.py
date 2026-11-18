@@ -9,6 +9,7 @@ exist, and overlapping writes merge instead of duplicating.
 
 from __future__ import annotations
 
+import time
 from contextlib import contextmanager
 from typing import Any, List, Optional
 
@@ -149,6 +150,55 @@ def test_an_empty_ledger_means_the_whole_window_is_missing():
 
 def test_a_reversed_window_has_no_gaps():
     assert missing_intervals([], 500, 100) == []
+
+
+def test_two_bars_one_period_apart_leave_no_gap():
+    """Adjacent bars are neighbours, not a one-second hole.
+
+    ``covered_from``/``covered_to`` are the times of bars that exist, not
+    inclusive second ranges, so two weekly bars a week apart describe
+    *consecutive* bars. Subtracting one second from the later start leaves
+    ``spacing - 1`` seconds that no bar could ever occupy; reporting that as a
+    gap sent the fill back to the venues on every request, forever, for a hole
+    that was arithmetic rather than missing data.
+    """
+    week = 604800
+    ranges = [CoveredRange(0, 0, 1), CoveredRange(week, week, 1)]
+
+    assert missing_intervals(ranges, 0, week, spacing=week) == []
+    # Without the spacing the same ledger looks like a week-long hole.
+    assert missing_intervals(ranges, 0, week) == [(1, week - 1)]
+
+
+def test_an_interior_hole_exactly_one_period_wide_is_reported():
+    """One period of missing time is one missing bar and must be fetched."""
+    week = 604800
+    ranges = [CoveredRange(0, 0, 1), CoveredRange(2 * week, 2 * week, 1)]
+
+    assert missing_intervals(ranges, 0, 2 * week, spacing=week) == [(1, 2 * week - 1)]
+
+
+def test_a_tail_is_only_fetched_once_a_bar_could_have_closed():
+    """A forming bar is withheld by every venue, so asking costs the whole failover.
+
+    Whether a bar has closed is a fact about the clock, not about the requested
+    window: a live-edge request ends at "now", which says nothing about
+    completion. The newest stored bar starts one period before the next one, and
+    that next bar is complete only once a full period of its own has elapsed.
+    """
+    week = 604800
+    now = int(time.time())
+
+    fresh = [CoveredRange(now - 3 * 86400, now - 3 * 86400, 1)]
+    assert missing_intervals(fresh, now - 3 * 86400, now, spacing=week) == []
+
+    closed = [CoveredRange(now - week, now - week, 1)]
+    assert missing_intervals(closed, now - week, now, spacing=week) == []
+
+    stale = [CoveredRange(now - 2 * week, now - 2 * week, 1)]
+    assert missing_intervals(stale, now - 2 * week, now, spacing=week) == [
+        (now - 2 * week + 1, now)
+    ]
 
 
 def test_coverage_is_recorded_only_for_the_bars_that_came_back(monkeypatch):
