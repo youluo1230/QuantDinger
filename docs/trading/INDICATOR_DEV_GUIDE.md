@@ -120,7 +120,7 @@ Project source rules require English identifiers, comments, input titles, and de
 
 ## 5. Settings: declaring input.* fields
 
-The IDE builds the parameter panel by scanning the script's <code>input.*</code> declarations. There is nothing to declare separately and nothing to register: an input that exists in the source becomes a form field, and its title, group, tooltip, and bounds come from the arguments you wrote.
+The IDE derives the study's input metadata from the script's <code>input.*</code> declarations and hands it to the charting library, which renders the fields in its own **Settings** dialog (the gear icon on the study's legend). There is nothing to declare separately and nothing to register: an input that exists in the source becomes a field, and its title, group, tooltip, and bounds come from the arguments you wrote. A value changed there re-runs the script and redraws the study immediately; the value belongs to the chart workspace, not to a separate parameter form.
 
 ~~~pine
 //@version=6
@@ -571,3 +571,27 @@ Always verify and backtest generated strategy code again. Marketplace publicatio
 - [ ] No future data is read: no live higher-timeframe value, no rewritten past bar.
 - [ ] Short datasets, warm-up periods, and unusual parameters do not crash the preview.
 - [ ] The script saves without an <code>error</code>-severity hint, and the chart preview draws what the description claims.
+
+---
+
+
+## 18. Where the IDE ends and the library begins
+
+The Indicator IDE is a chart workspace, not a drawing kit built beside one. The ownership split is deliberate, and it decides where a new control belongs:
+
+| Concern | Owned by |
+| --- | --- |
+| Symbol (search, watchlist, venue) | the library's native header |
+| Interval and chart type | the library's native header |
+| Adding a study, moving it between panes, reading its legend values | the library |
+| A study's inputs | the library's Settings dialog, backed by the script's <code>input.*</code> metadata |
+| Saving the script, signal alerts, converting to a strategy | the IDE's own action bar |
+| The Pine editor | the IDE, as a bottom drawer bound to one pane |
+| The workspace archive (panes, symbols, intervals, studies, inputs) | the IDE, through <code>/api/users/chart-templates</code> |
+
+Two rules follow:
+
+- Do not add a second symbol picker, interval picker, chart-type picker, or parameter form to the IDE chrome. Every one of those was removed once the library rendered its own; a duplicate control is a second source of truth that drifts.
+- Anything that changes what the chart shows must go through the library's API (<code>createStudy</code>, <code>removeEntity</code>, <code>getInputValues</code>, <code>setChartType</code>) or through the datafeed, so reloading the workspace reproduces the same screen.
+
+The design record, including the ticker contract (<code>QD:&lt;market&gt;:&lt;marketType&gt;:&lt;exchangeId&gt;:&lt;instrumentId&gt;</code>) and the archive JSON shape, is [The chart-first Indicator IDE](INDICATOR_IDE_CHART_FIRST.md).
