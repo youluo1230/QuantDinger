@@ -594,4 +594,4 @@ Two rules follow:
 - Do not add a second symbol picker, interval picker, chart-type picker, or parameter form to the IDE chrome. Every one of those was removed once the library rendered its own; a duplicate control is a second source of truth that drifts.
 - Anything that changes what the chart shows must go through the library's API (<code>createStudy</code>, <code>removeEntity</code>, <code>getInputValues</code>, <code>setChartType</code>) or through the datafeed, so reloading the workspace reproduces the same screen.
 
-The design record, including the ticker contract (<code>QD:&lt;market&gt;:&lt;marketType&gt;:&lt;exchangeId&gt;:&lt;instrumentId&gt;</code>) and the archive JSON shape, is [The chart-first Indicator IDE](INDICATOR_IDE_CHART_FIRST.md).
+The design record, including the ticker contract (<code>QD:&lt;instrumentId&gt;:&lt;market&gt;:&lt;marketType&gt;:&lt;exchangeId&gt;</code>) and the archive JSON shape, is [The chart-first Indicator IDE](INDICATOR_IDE_CHART_FIRST.md).

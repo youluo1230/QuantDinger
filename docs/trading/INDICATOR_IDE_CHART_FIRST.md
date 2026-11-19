@@ -72,11 +72,16 @@ prototyped, rejected, and is recorded on issue #2.
 
 ### Symbol ticker
 
-`QD:<market>:<marketType>:<exchangeId>:<instrumentId>`, for example
-`QD:crypto:swap:binance:BTC/USDT`. The encoding is produced by `searchSymbols`
-and `resolveSymbol`, and parsed by `decodeTicker`. Panes store the encoded
-ticker. `resolveSymbol` falls back to a bare symbol plus the pane's current
-venue when decoding fails, so callers that still pass `BTC/USDT` keep working.
+`QD:<instrumentId>:<market>:<marketType>:<exchangeId>`, for example
+`QD:BTC/USDT:crypto:swap:binance`. The instrument sits in the second slot
+because the header's symbol button falls back to the second colon-separated
+segment of the pro name, and a button reading `CRYPTO` instead of `BTC/USDT`
+looks broken. The encoding is produced by `searchSymbols` and `resolveSymbol`,
+and parsed by `decodeSymbolTicker`; the pre-swap order
+(`QD:<market>:<marketType>:<exchangeId>:<instrumentId>`) is still decoded so
+older archives keep loading. Panes store the encoded ticker. `resolveSymbol`
+falls back to a bare symbol plus the pane's current venue when decoding fails,
+so callers that still pass `BTC/USDT` keep working.
 
 ### Datafeed
 
@@ -119,7 +124,7 @@ name, and `version` is fixed at 1.
   "editorOpen": false,
   "panes": [
     {
-      "symbol": "QD:Crypto:swap:binance:BTC/USDT",
+      "symbol": "QD:BTC/USDT:crypto:swap:binance",
       "timeframe": "4H",
       "chartType": "candle_solid",
       "indicators": [
